@@ -171,7 +171,8 @@ impl Pipeline {
                 compress_json_array(content, retention).ok().map(|r| r.content)
             }
             ContentType::JsonObject => {
-                compress_json_array(content, retention).ok().map(|r| r.content)
+                // JSON objects are not array-compressed; pass through as-is.
+                Some(content.to_string())
             }
             ContentType::Code => {
                 Some(if self.config.compression.compressors.code_compressor {
@@ -255,18 +256,21 @@ mod tests {
             name: "write_file".into(),
             args: r#"{"path":"/tmp/x.txt"}"#.into(),
             result: Some("wrote 10 bytes".into()),
-            is_error: true,  // errors speed up detection
+            is_error: true,  // errors speed up detection via adaptive threshold
         };
 
-        // First 3 calls
-        for _ in 0..3 {
-            let result = pipeline.process_tool_call(&tool).await;
-            assert_eq!(result.loop_verdict, LoopVerdict::Allow);
-        }
+        // With default config: max_repeats=3, error_reduction=1, min_repeats=2.
+        // After each error the effective threshold drops by error_reduction (floored at
+        // min_repeats=2).  So by the time 2 entries are in history the threshold is 2
+        // and the 3rd call is blocked.
+        let r1 = pipeline.process_tool_call(&tool).await;
+        assert_eq!(r1.loop_verdict, LoopVerdict::Allow);
+        let r2 = pipeline.process_tool_call(&tool).await;
+        assert_eq!(r2.loop_verdict, LoopVerdict::Allow);
 
-        // 4th call should be blocked
-        let result = pipeline.process_tool_call(&tool).await;
-        assert!(result.loop_verdict.is_blocked());
+        // 3rd call should now be blocked (adaptive tightened the threshold)
+        let r3 = pipeline.process_tool_call(&tool).await;
+        assert!(r3.loop_verdict.is_blocked());
     }
 
     #[tokio::test]

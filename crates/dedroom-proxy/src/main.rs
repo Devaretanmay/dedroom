@@ -86,4 +86,3 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-fn _assert_send<T: Send>(_: &T) {}

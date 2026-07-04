@@ -250,8 +250,7 @@ impl LoopDetector {
         // 5. Count repeats in history
         let effective_max = tcfg
             .and_then(|t| t.max_repeats)
-            .or_else(|| Some(self.adaptive.effective_max_repeats()))
-            .unwrap_or(self.config.max_repeats);
+            .unwrap_or_else(|| self.adaptive.effective_for_tool(tool));
 
         let effective_mode = tcfg
             .and_then(|t| t.count_mode)

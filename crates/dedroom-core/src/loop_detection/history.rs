@@ -4,6 +4,7 @@
 //! History is automatically pruned when it exceeds the configured window size
 //! (fixes the unbounded-growth problem).
 
+use std::collections::VecDeque;
 use crate::config::CountMode;
 
 /// A single entry in the call history.
@@ -21,8 +22,8 @@ pub struct HistoryEntry {
 pub struct HistoryTracker {
     /// Maximum number of entries to keep.
     window: usize,
-    /// Circular buffer of entries (newest at end).
-    entries: Vec<HistoryEntry>,
+    /// Circular buffer of entries (newest at back).
+    entries: VecDeque<HistoryEntry>,
 }
 
 impl HistoryTracker {
@@ -30,16 +31,16 @@ impl HistoryTracker {
     pub fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
-            entries: Vec::with_capacity(window),
+            entries: VecDeque::with_capacity(window),
         }
     }
 
     /// Push a new tool call into history.
     pub fn push(&mut self, tool: String, canonical_args: String, was_error: bool) {
         if self.entries.len() >= self.window {
-            self.entries.remove(0);
+            self.entries.pop_front();
         }
-        self.entries.push(HistoryEntry {
+        self.entries.push_back(HistoryEntry {
             tool,
             canonical_args,
             was_error,
@@ -96,7 +97,7 @@ impl HistoryTracker {
     pub fn set_window(&mut self, new_window: usize) {
         self.window = new_window.max(1);
         while self.entries.len() > self.window {
-            self.entries.remove(0);
+            self.entries.pop_front();
         }
     }
 }

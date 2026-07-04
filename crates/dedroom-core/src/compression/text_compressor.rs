@@ -62,14 +62,6 @@ pub fn compress_text(input: &str) -> String {
     result
 }
 
-/// ONNX-based ML text compression (requires ort runtime).
-/// Currently a placeholder — actual model loading is deferred.
-#[cfg(feature = "ml")]
-pub fn compress_text_ml(input: &str, _model_path: &str) -> String {
-    // TODO: load Kompress-v2 via ort crate, run inference, return compressed text
-    compress_text(input)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

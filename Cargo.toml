@@ -43,7 +43,6 @@ bytes = "1"
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-prometheus = { version = "0.13", features = ["process"] }
 
 # Error handling
 thiserror = "2"
@@ -55,11 +54,7 @@ uuid = { version = "1", features = ["v4"] }
 # Regex
 regex = "1"
 
-# Logging
-log = "0.4"
-
 # Cache / concurrency
-dashmap = "6"
 lru = "0.12"
 
 # Tree-sitter for code compression
@@ -68,18 +63,7 @@ tree-sitter-rust = "0.23"
 tree-sitter-python = "0.23"
 tree-sitter-javascript = "0.23"
 
-# ONNX / ML
-ort = "2"
-
-# Token counting
-tiktoken-rs = "0.6"
-
 async-trait = "0.1"
-# SQLite
-rusqlite = { version = "0.31", features = ["bundled"] }
-
-# Redis
-redis = { version = "0.25", features = ["tokio-comp"] }
 
 # YAML config
 humantime = "2"

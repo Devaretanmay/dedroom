@@ -85,7 +85,7 @@ use lru::LruCache;
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct EmbeddingCache {
-    cache: LruCache<u64, Embedding>,
+    cache: LruCache<String, Embedding>,
     embedder: EmbeddingBackend,
 }
 
@@ -100,14 +100,7 @@ impl EmbeddingCache {
 
     /// Get embedding for text, using cache if available.
     pub async fn get(&mut self, text: &str) -> Result<Embedding, EmbedderError> {
-        let key = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            text.hash(&mut hasher);
-            hasher.finish()
-        };
-
-        if let Some(emb) = self.cache.get(&key) {
+        if let Some(emb) = self.cache.get(text) {
             return Ok(emb.clone());
         }
 
@@ -116,7 +109,7 @@ impl EmbeddingCache {
             .next()
             .ok_or_else(|| EmbedderError::ComputationFailed("empty result".into()))?;
 
-        self.cache.put(key, emb.clone());
+        self.cache.put(text.to_string(), emb.clone());
         Ok(emb)
     }
 

@@ -132,20 +132,6 @@ impl CcrStore {
         self.backend.put(key, entry).await;
     }
 
-    pub async fn put_with_meta(
-        &self,
-        key: Hash,
-        original: String,
-        was_error: bool,
-        tool: String,
-        args_hash: Hash,
-    ) {
-        let mut entry = CcrEntry::new(original, was_error, self.default_ttl);
-        entry.tool = Some(tool);
-        entry.args_hash = Some(args_hash);
-        self.backend.put(key, entry).await;
-    }
-
     pub async fn get(&self, key: &Hash) -> Option<CcrEntry> {
         self.backend.get(key).await
     }
@@ -162,15 +148,6 @@ impl CcrStore {
     pub fn default_ttl(&self) -> Duration {
         self.default_ttl
     }
-}
-
-// ── SQLite store (placeholder) ──────────────────────────────────────────────
-
-/// SQLite-backed CCR store (requires `rusqlite`).
-#[cfg(feature = "sqlite")]
-#[derive(Debug)]
-pub struct SqliteStore {
-    // TODO: implement SQLite backend
 }
 
 #[cfg(test)]

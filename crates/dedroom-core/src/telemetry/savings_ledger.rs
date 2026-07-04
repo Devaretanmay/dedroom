@@ -19,21 +19,6 @@ pub struct LoopBlockSaving {
     pub estimated_tokens_saved: u64,
 }
 
-/// A loop early-intervention event.
-#[derive(Debug, Clone)]
-pub struct LoopEarlyIntervention {
-    pub tool_name: String,
-    pub calls_before_block: u64,
-    pub strategy: String,
-}
-
-/// A recorded saving event.
-#[derive(Debug, Clone)]
-pub enum SavingEvent {
-    Compression(CompressionSaving),
-    LoopBlocked(LoopBlockSaving),
-    LoopEarlyIntervention(LoopEarlyIntervention),
-}
 
 /// A snapshot savings report.
 #[derive(Debug, Clone, Default)]
@@ -83,12 +68,6 @@ impl SavingsLedger {
     pub fn record_loop_block(&self, saving: &LoopBlockSaving) {
         self.loop_calls_blocked.fetch_add(saving.calls_prevented, Ordering::Relaxed);
         self.loop_tokens_saved.fetch_add(saving.estimated_tokens_saved, Ordering::Relaxed);
-    }
-
-    /// Record an early intervention event.
-    pub fn record_early_intervention(&self, _saving: &LoopEarlyIntervention) {
-        // For now, counts toward loop blocks
-        self.loop_calls_blocked.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get a snapshot report.

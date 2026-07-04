@@ -17,7 +17,6 @@ thiserror.workspace = true
 anyhow.workspace = true
 regex.workspace = true
 tracing.workspace = true
-dashmap.workspace = true
 lru.workspace = true
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true

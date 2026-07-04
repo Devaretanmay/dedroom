@@ -6,6 +6,6 @@
 mod savings_ledger;
 
 pub use savings_ledger::{
-    SavingsLedger, SavingEvent, SavingsReport,
-    CompressionSaving, LoopBlockSaving, LoopEarlyIntervention,
+    SavingsLedger, SavingsReport,
+    CompressionSaving, LoopBlockSaving,
 };
