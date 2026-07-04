@@ -94,6 +94,14 @@ pub struct LoopDetectionConfig {
     /// Argument validation rules.
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
+
+    /// History backend: "memory" (default) or "sqlite" (requires `sqlite` feature).
+    #[serde(default = "default_history_backend")]
+    pub history_backend: String,
+
+    /// Path to the SQLite database file for loop detection history
+    /// (only used when `history_backend` is "sqlite").
+    pub history_path: Option<String>,
 }
 
 impl Default for LoopDetectionConfig {
@@ -109,6 +117,8 @@ impl Default for LoopDetectionConfig {
             semantic: SemanticConfig::default(),
             tools: Vec::new(),
             rules: Vec::new(),
+            history_backend: "memory".into(),
+            history_path: None,
         }
     }
 }
@@ -344,6 +354,9 @@ pub struct CcrConfig {
     pub ttl_seconds: u64,
     #[serde(default = "default_true")]
     pub shared_with_loop_detection: bool,
+    /// Path to the SQLite database file (only used when backend="sqlite").
+    /// Defaults to "ccr.db" in the current working directory.
+    pub path: Option<String>,
 }
 
 impl Default for CcrConfig {
@@ -352,6 +365,7 @@ impl Default for CcrConfig {
             backend: "memory".into(),
             ttl_seconds: 1800,
             shared_with_loop_detection: true,
+            path: None,
         }
     }
 }
@@ -483,6 +497,10 @@ fn default_detection_methods() -> Vec<String> {
 
 fn default_max_input_tokens() -> u64 {
     100_000
+}
+
+fn default_history_backend() -> String {
+    "memory".into()
 }
 
 fn default_ccr_backend() -> String {

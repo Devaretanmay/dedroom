@@ -55,12 +55,7 @@ pub struct Pipeline {
 impl Pipeline {
     /// Create a new pipeline from configuration with default components.
     pub fn new(config: DedrooMConfig) -> Self {
-        let ccr = CcrStore::new(
-            std::sync::Arc::new(crate::ccr::InMemoryStore::new(
-                config.compression.ccr.ttl_seconds,
-            )),
-            config.compression.ccr.ttl_seconds,
-        );
+        let ccr = Self::create_ccr_store(&config);
         Self {
             config: config.clone(),
             loop_detector: LoopDetector::new(&config.loop_detection),
@@ -71,6 +66,45 @@ impl Pipeline {
             ccr_store: ccr,
             savings_ledger: SavingsLedger::new(),
         }
+    }
+
+    /// Create the CCR store based on configuration and enabled features.
+    ///
+    /// When the `sqlite` feature is enabled and `backend` is `"sqlite"`, uses
+    /// a persistent [`SqliteStore`]. Falls back to [`InMemoryStore`] in all
+    /// other cases.
+    fn create_ccr_store(config: &DedrooMConfig) -> CcrStore {
+        #[cfg(feature = "sqlite")]
+        if config.compression.ccr.backend == "sqlite" {
+            let path = config
+                .compression
+                .ccr
+                .path
+                .as_deref()
+                .unwrap_or("ccr.db");
+            match crate::ccr::SqliteStore::new(path, config.compression.ccr.ttl_seconds) {
+                Ok(sqlite) => {
+                    tracing::info!("CCR using SQLite backend: {path}");
+                    return CcrStore::new(
+                        std::sync::Arc::new(sqlite),
+                        config.compression.ccr.ttl_seconds,
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to open SQLite CCR store at {path}: {e}. 
+                         Falling back to in-memory."
+                    );
+                }
+            }
+        }
+
+        CcrStore::new(
+            std::sync::Arc::new(crate::ccr::InMemoryStore::new(
+                config.compression.ccr.ttl_seconds,
+            )),
+            config.compression.ccr.ttl_seconds,
+        )
     }
 
     /// Process a tool call through the full pipeline.
@@ -309,6 +343,129 @@ mod tests {
 
         let report = pipeline.savings_report();
         assert!(report.total_original_tokens > 0);
+    }
+
+    // ── SQLite E2E persistence test (behind `sqlite` feature) ────────────
+
+    /// Full end-to-end test: runs a Pipeline with SQLite-backed CCR + loop
+    /// detection history, drops it (simulating a restart), then creates a new
+    /// Pipeline pointing to the same DB files and verifies both CCR and loop
+    /// detection state persisted.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_pipeline_sqlite_persistence_e2e() {
+        let dir = tempfile::tempdir().unwrap();
+        let ccr_db = dir.path().join("e2e_ccr.db");
+        let history_db = dir.path().join("e2e_history.db");
+
+        let yaml = format!(
+            r#"
+            loop_detection:
+              max_repeats: 3
+              history_backend: sqlite
+              history_path: {history}
+            compression:
+              ccr:
+                backend: sqlite
+                path: {ccr}
+                ttl_seconds: 3600
+            "#,
+            history = history_db.to_string_lossy(),
+            ccr = ccr_db.to_string_lossy(),
+        );
+
+        let config = DedrooMConfig::from_yaml_str(&yaml).unwrap();
+
+        // ── Session 1: populate both backends ────────────────────────────
+
+        let mut pipeline1 = Pipeline::new(config.clone());
+
+        let tool = ToolCall {
+            name: "write_file".into(),
+            args: r#"{"path":"/tmp/e2e.txt"}"#.into(),
+            result: Some("wrote 10 bytes".into()),
+            is_error: true,
+        };
+
+        // Push 3 identical error calls — 3rd should be blocked
+        let r1 = pipeline1.process_tool_call(&tool).await;
+        assert_eq!(r1.loop_verdict, LoopVerdict::Allow);
+
+        let r2 = pipeline1.process_tool_call(&tool).await;
+        assert_eq!(r2.loop_verdict, LoopVerdict::Allow);
+
+        let r3 = pipeline1.process_tool_call(&tool).await;
+        assert!(r3.loop_verdict.is_blocked(), "3rd call should be blocked");
+
+        // Process a tool with a result to populate CCR
+        let search_tool = ToolCall {
+            name: "search".into(),
+            args: r#"{"query":"persistence test"}"#.into(),
+            result: Some("result line 1\nresult line 2\nresult line 3".into()),
+            is_error: false,
+        };
+        let r4 = pipeline1.process_tool_call(&search_tool).await;
+        assert_eq!(r4.loop_verdict, LoopVerdict::Allow);
+
+        // Verify state in session 1
+        let summary1 = pipeline1.loop_state_summary();
+        assert_eq!(summary1.total_calls, 4, "4 total calls in session 1");
+        assert_eq!(*summary1.tool_counts.get("write_file").unwrap(), 3);
+        assert_eq!(*summary1.tool_counts.get("search").unwrap(), 1);
+
+        let ccr_key = hash_tool_call(&search_tool.name, &search_tool.args);
+        let ccr_entry = pipeline1.ccr_store.get(&ccr_key).await;
+        assert!(ccr_entry.is_some(), "CCR should have stored the search result");
+        assert_eq!(ccr_entry.unwrap().original, "result line 1\nresult line 2\nresult line 3");
+
+        // ── Simulate restart: drop pipeline1, create pipeline2 ────────────
+        drop(pipeline1);
+
+        let mut pipeline2 = Pipeline::new(config);
+
+        // ── Session 2: verify persistence BEFORE making any calls ─────────
+
+        // State should reflect session 1's 4 calls (3 write_file + 1 search)
+        let summary2_before = pipeline2.loop_state_summary();
+        assert_eq!(
+            summary2_before.total_calls, 4,
+            "4 history entries loaded from DB (3 write_file, 1 search)"
+        );
+        assert_eq!(*summary2_before.tool_counts.get("write_file").unwrap(), 3);
+        assert_eq!(*summary2_before.tool_counts.get("search").unwrap(), 1);
+
+        // Loop detection: same tool call should be blocked immediately
+        // (history has 3 identical entries, threshold = max_repeats = 3)
+        let r_after = pipeline2.process_tool_call(&tool).await;
+        assert!(
+            r_after.loop_verdict.is_blocked(),
+            "Loop detection should persist: same call blocked after restart"
+        );
+
+        // CCR: stored data should be retrievable
+        let ccr_entry_after = pipeline2.ccr_store.get(&ccr_key).await;
+        assert!(
+            ccr_entry_after.is_some(),
+            "CCR data should persist across restarts"
+        );
+        assert_eq!(
+            ccr_entry_after.unwrap().original,
+            "result line 1\nresult line 2\nresult line 3"
+        );
+
+        // New tool call with different args should still be allowed
+        let new_tool = ToolCall {
+            name: "write_file".into(),
+            args: r#"{"path":"/tmp/new.txt"}"#.into(),
+            result: Some("ok".into()),
+            is_error: false,
+        };
+        let r_new = pipeline2.process_tool_call(&new_tool).await;
+        assert_eq!(
+            r_new.loop_verdict,
+            LoopVerdict::Allow,
+            "Different args should be allowed"
+        );
     }
 
     #[tokio::test]

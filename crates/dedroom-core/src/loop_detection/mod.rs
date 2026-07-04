@@ -16,7 +16,10 @@ mod adaptive;
 mod semantic;
 
 pub use engine::{LoopDetector, LoopVerdict, RuleEngine, CompiledRule, LoopStateSummary};
-pub use history::HistoryTracker;
+pub use history::{HistoryBackend, HistoryTracker, HistoryEntry};
 pub use canonical::{strip_volatile_fields, VolatileInferenceEngine};
 pub use adaptive::AdaptiveThreshold;
 pub use semantic::SemanticDetector;
+
+#[cfg(feature = "sqlite")]
+pub use history::SqliteHistoryTracker;

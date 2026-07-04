@@ -11,6 +11,7 @@ use crate::config::{
     RuleConfig, RuleKind, RuleAction, ErrorDetectionConfig,
 };
 
+use super::history::HistoryBackend;
 use super::history::HistoryTracker;
 use super::canonical::{strip_volatile_fields, VolatileInferenceEngine};
 use super::adaptive::AdaptiveThreshold;
@@ -180,7 +181,7 @@ impl ToolConfig {
 #[derive(Debug)]
 pub struct LoopDetector {
     config: LoopDetectionConfig,
-    history: HistoryTracker,
+    history: Box<dyn HistoryBackend>,
     rule_engine: RuleEngine,
     adaptive: AdaptiveThreshold,
     volatile_inference: VolatileInferenceEngine,
@@ -188,14 +189,18 @@ pub struct LoopDetector {
 }
 
 impl LoopDetector {
-    /// Create a new detector from configuration.
+    /// Create a new detector from configuration with the default in-memory
+    /// history backend (or SQLite if configured and the `sqlite` feature is
+    /// enabled).
     pub fn new(config: &LoopDetectionConfig) -> Self {
         let effective_window = config.history_window
-            .unwrap_or(config.max_repeats * 2);
+            .unwrap_or(config.max_repeats * 2) as usize;
+
+        let history: Box<dyn HistoryBackend> = Self::create_history_backend(config, effective_window);
 
         Self {
             config: config.clone(),
-            history: HistoryTracker::new(effective_window as usize),
+            history,
             rule_engine: RuleEngine::from_config(&config.rules),
             adaptive: AdaptiveThreshold::new(
                 config.adaptive.enabled,
@@ -209,6 +214,48 @@ impl LoopDetector {
             ),
             tool_configs: ToolConfig::from_overrides(&config.tools),
         }
+    }
+
+    /// Create a detector with an explicit history backend.
+    pub fn with_backend(config: &LoopDetectionConfig, history: Box<dyn HistoryBackend>) -> Self {
+        Self {
+            config: config.clone(),
+            history,
+            rule_engine: RuleEngine::from_config(&config.rules),
+            adaptive: AdaptiveThreshold::new(
+                config.adaptive.enabled,
+                config.max_repeats,
+                config.adaptive.error_reduction,
+                config.adaptive.min_repeats,
+            ),
+            volatile_inference: VolatileInferenceEngine::new(
+                config.volatile_fields.auto_inference,
+                config.volatile_fields.min_occurrences as usize,
+            ),
+            tool_configs: ToolConfig::from_overrides(&config.tools),
+        }
+    }
+
+    /// Create the appropriate history backend based on configuration.
+    fn create_history_backend(config: &LoopDetectionConfig, window: usize) -> Box<dyn HistoryBackend> {
+        #[cfg(feature = "sqlite")]
+        if config.history_backend == "sqlite" {
+            let path = config.history_path.as_deref().unwrap_or("loop_history.db");
+            match crate::loop_detection::SqliteHistoryTracker::new(path, window) {
+                Ok(sqlite) => {
+                    tracing::info!("Loop detection history using SQLite backend: {path}");
+                    return Box::new(sqlite);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to open SQLite loop history at {path}: {e}. 
+                         Falling back to in-memory."
+                    );
+                }
+            }
+        }
+
+        Box::new(HistoryTracker::new(window))
     }
 
     /// Verify a tool call. Returns the loop verdict.
@@ -306,9 +353,10 @@ impl LoopDetector {
     pub fn state_summary(&self) -> LoopStateSummary {
         let total_calls = self.history.len();
         let tool_counts: HashMap<String, usize> = self.history
-            .iter()
+            .snapshot()
+            .into_iter()
             .fold(HashMap::new(), |mut acc, entry| {
-                *acc.entry(entry.tool.clone()).or_default() += 1;
+                *acc.entry(entry.tool).or_default() += 1;
                 acc
             });
 

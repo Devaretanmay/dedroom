@@ -22,12 +22,22 @@ tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-python.workspace = true
 tree-sitter-javascript.workspace = true
+rusqlite = { workspace = true, optional = true }
 
 [features]
 default = []
 ml = []
-sqlite = []
+sqlite = ["rusqlite"]
 # Local
 
 [dev-dependencies]
 tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "loop_history_bench"
+harness = false
+
+[[bench]]
+name = "pipeline_bench"
+harness = false

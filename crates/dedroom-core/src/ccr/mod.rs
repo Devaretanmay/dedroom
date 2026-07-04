@@ -7,3 +7,6 @@
 mod store;
 
 pub use store::{CcrStore, CcrBackend, InMemoryStore, CcrEntry, hash_tool_call};
+
+#[cfg(feature = "sqlite")]
+pub use store::SqliteStore;

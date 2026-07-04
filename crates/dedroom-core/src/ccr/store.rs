@@ -112,6 +112,199 @@ pub fn hash_tool_call(tool: &str, canonical_args: &str) -> Hash {
     hasher.finalize()
 }
 
+// ── SQLite backend (behind `sqlite` feature) ────────────────────────────────
+
+/// SQLite-backed CCR store for persistent on-disk storage.
+///
+/// Creates a `ccr_entries` table with BLOB keys, TEXT values, and epoch-
+/// second expiry. Uses `tokio::sync::Mutex` internally because `rusqlite::Connection`
+/// is `Send` but not `Sync`.
+#[cfg(feature = "sqlite")]
+#[derive(Debug)]
+pub struct SqliteStore {
+    conn: tokio::sync::Mutex<rusqlite::Connection>,
+    default_ttl: Duration,
+    /// Put counter. Only prunes expired entries every 100 puts.
+    put_counter: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(feature = "sqlite")]
+impl SqliteStore {
+    /// Open or create a database at `path`.
+    ///
+    /// Pass `":memory:"` for an in-memory database (useful in tests).
+    pub fn new(path: &str, ttl_seconds: u64) -> rusqlite::Result<Self> {
+        let conn = rusqlite::Connection::open(path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ccr_entries (
+                key_hash   BLOB    PRIMARY KEY NOT NULL,
+                original   TEXT    NOT NULL,
+                was_error  INTEGER NOT NULL DEFAULT 0,
+                expires_at INTEGER NOT NULL,
+                tool       TEXT,
+                args_hash  BLOB
+            )"
+        )?;
+        Ok(Self {
+            conn: tokio::sync::Mutex::new(conn),
+            default_ttl: Duration::from_secs(ttl_seconds),
+            put_counter: std::sync::atomic::AtomicU64::new(1),
+        })
+    }
+
+    /// Create an in-memory SQLite store (convenience for tests).
+    pub fn new_in_memory(ttl_seconds: u64) -> rusqlite::Result<Self> {
+        Self::new(":memory:", ttl_seconds)
+    }
+
+    /// Delete expired entries to keep the DB bounded.
+    fn prune_expired(&self) {
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        if let Ok(conn) = self.conn.try_lock() {
+            let _ = conn.execute(
+                "DELETE FROM ccr_entries WHERE expires_at <= ?1",
+                rusqlite::params![now_epoch],
+            );
+        }
+    }
+}
+
+#[async_trait::async_trait]
+#[cfg(feature = "sqlite")]
+impl CcrBackend for SqliteStore {
+    async fn put(&self, key: Hash, entry: CcrEntry) {
+        let now = Instant::now();
+        let remaining = if entry.expires_at > now {
+            entry.expires_at - now
+        } else {
+            self.default_ttl
+        };
+        let expires_at_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            + remaining.as_secs() as i64;
+
+        let tool = entry.tool.as_deref();
+        let args_hash_bytes = entry.args_hash.as_ref().map(|h| h.as_bytes() as &[u8]);
+
+        // Scope block so the lock guard drops before we call prune_expired
+        {
+            let conn = self.conn.lock().await;
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO ccr_entries (key_hash, original, was_error, expires_at, tool, args_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    key.as_bytes() as &[u8],
+                    entry.original,
+                    entry.was_error as i32,
+                    expires_at_epoch,
+                    tool,
+                    args_hash_bytes,
+                ],
+            );
+        } // conn guard dropped here
+
+        // Amortize expired-entry cleanup: only prune every 100 puts.
+        let prev = self.put_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if prev % 100 == 0 {
+            self.prune_expired();
+        }
+    }
+
+    async fn get(&self, key: &Hash) -> Option<CcrEntry> {
+        let key_bytes = key.as_bytes() as &[u8];
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT original, was_error, expires_at, tool, args_hash
+                 FROM ccr_entries WHERE key_hash = ?1",
+            )
+            .ok()?;
+
+        let row = stmt
+            .query_row(rusqlite::params![key_bytes], |row| {
+                let original: String = row.get(0)?;
+                let was_error: bool = row.get::<_, i32>(1)? != 0;
+                let expires_at_epoch: i64 = row.get(2)?;
+                let tool: Option<String> = row.get(3)?;
+                let args_hash_blob: Option<Vec<u8>> = row.get(4)?;
+                Ok((original, was_error, expires_at_epoch, tool, args_hash_blob))
+            })
+            .ok()?;
+
+        let (original, was_error, expires_at_epoch, tool, args_hash_blob) = row;
+
+        // Check expiry
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        if expires_at_epoch <= now_epoch {
+            return None;
+        }
+
+        // Reconstruct Instant from remaining duration
+        let remaining_secs = (expires_at_epoch - now_epoch) as u64;
+        let expires_at = Instant::now() + Duration::from_secs(remaining_secs);
+
+        // Parse args_hash blob back to blake3::Hash
+        let args_hash = args_hash_blob.and_then(|b| {
+            let arr: [u8; 32] = <[u8; 32]>::try_from(b).ok()?;
+            Some(blake3::Hash::from_bytes(arr))
+        });
+
+        Some(CcrEntry {
+            original,
+            was_error,
+            expires_at,
+            tool,
+            args_hash,
+        })
+    }
+
+    async fn exists_with_error(&self, key: &Hash) -> Option<bool> {
+        let key_bytes = key.as_bytes() as &[u8];
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT was_error FROM ccr_entries WHERE key_hash = ?1 AND expires_at > ?2",
+            )
+            .ok()?;
+
+        stmt.query_row(rusqlite::params![key_bytes, now_epoch], |row| {
+            let was_error: bool = row.get::<_, i32>(0)? != 0;
+            Ok(was_error)
+        })
+        .ok()
+    }
+
+    async fn prune(&self) {
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let conn = self.conn.lock().await;
+        let _ = conn.execute(
+            "DELETE FROM ccr_entries WHERE expires_at <= ?1",
+            rusqlite::params![now_epoch],
+        );
+    }
+}
+
+// ── Top-level store wrapper ─────────────────────────────────────────────────
+
 /// The top-level CCR store, wrapping a backend.
 #[derive(Debug, Clone)]
 pub struct CcrStore {
@@ -195,5 +388,122 @@ mod tests {
         let h1 = hash_tool_call("write_file", r#"{"path":"/tmp/a.txt"}"#);
         let h2 = hash_tool_call("write_file", r#"{"path":"/tmp/b.txt"}"#);
         assert_ne!(h1, h2);
+    }
+
+    // ── SQLite backend tests ─────────────────────────────────────────────
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_put_get() {
+        let store = SqliteStore::new_in_memory(60).unwrap();
+        let key = blake3::hash(b"test data");
+        store
+            .put(key, CcrEntry::new("hello".into(), false, Duration::from_secs(60)))
+            .await;
+        let entry = store.get(&key).await;
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().original, "hello");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_expiry() {
+        let store = SqliteStore::new_in_memory(0).unwrap();
+        let key = blake3::hash(b"test data");
+        store
+            .put(key, CcrEntry::new("hello".into(), false, Duration::from_secs(0)))
+            .await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let entry = store.get(&key).await;
+        assert!(entry.is_none(), "entry should have expired");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_exists_with_error() {
+        let store = SqliteStore::new_in_memory(60).unwrap();
+        let key = blake3::hash(b"failed call");
+        store
+            .put(key, CcrEntry::new("error".into(), true, Duration::from_secs(60)))
+            .await;
+        assert_eq!(store.exists_with_error(&key).await, Some(true));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_prune() {
+        let store = SqliteStore::new_in_memory(0).unwrap();
+        let key = blake3::hash(b"expired entry");
+        store
+            .put(key, CcrEntry::new("gone".into(), false, Duration::from_secs(0)))
+            .await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        store.prune().await;
+        // After prune, getting should return None
+        let entry = store.get(&key).await;
+        assert!(entry.is_none());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_with_tool_and_args_hash() {
+        let store = SqliteStore::new_in_memory(60).unwrap();
+        let key = blake3::hash(b"tool call");
+        let args_hash = blake3::hash(b"args data");
+        let mut entry = CcrEntry::new("result".into(), false, Duration::from_secs(60));
+        entry.tool = Some("write_file".into());
+        entry.args_hash = Some(args_hash);
+
+        store.put(key, entry).await;
+        let retrieved = store.get(&key).await.unwrap();
+        assert_eq!(retrieved.original, "result");
+        assert_eq!(retrieved.tool.as_deref(), Some("write_file"));
+        assert_eq!(retrieved.args_hash, Some(args_hash));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_overwrite() {
+        let store = SqliteStore::new_in_memory(60).unwrap();
+        let key = blake3::hash(b"same key");
+
+        store
+            .put(key, CcrEntry::new("first".into(), false, Duration::from_secs(60)))
+            .await;
+        store
+            .put(key, CcrEntry::new("second".into(), false, Duration::from_secs(60)))
+            .await;
+
+        let entry = store.get(&key).await.unwrap();
+        assert_eq!(entry.original, "second");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_ccr.db");
+        let path_str = db_path.to_str().unwrap().to_string();
+
+        let key = blake3::hash(b"persist me");
+
+        // First connection: write
+        {
+            let store = SqliteStore::new(&path_str, 60).unwrap();
+            store
+                .put(key, CcrEntry::new("stored".into(), true, Duration::from_secs(60)))
+                .await;
+        }
+
+        // Second connection: read back — data should persist
+        {
+            let store = SqliteStore::new(&path_str, 60).unwrap();
+            let entry = store.get(&key).await;
+            assert!(entry.is_some(), "data should persist across connections");
+            let entry = entry.unwrap();
+            assert_eq!(entry.original, "stored");
+            assert!(entry.was_error);
+            assert!(entry.expires_at > Instant::now());
+        }
     }
 }
