@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "dedroom"
+version = "0.1.0"
+description = "Unified agent runtime: loop detection + context compression"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [
+    { name = "DedrooM contributors" },
+]
+
+[project.urls]
+repository = "https://github.com/Devaretanmay/dedroom"
+
+[project.optional-dependencies]
+all = []
+dev = ["pytest", "pytest-asyncio"]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "dedroom._core"

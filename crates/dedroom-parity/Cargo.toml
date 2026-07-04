@@ -1,0 +1,12 @@
+[package]
+name = "dedroom-parity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DedrooM parity test harness — validates Rust output against recorded fixtures"
+
+[dependencies]
+dedroom-core = { path = "../dedroom-core" }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

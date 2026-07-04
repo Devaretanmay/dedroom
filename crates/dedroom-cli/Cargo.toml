@@ -1,0 +1,18 @@
+[package]
+name = "dedroom-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DedrooM CLI — wrap AI agents with loop detection + compression"
+
+[dependencies]
+tokio = { workspace = true, features = ["process", "time"] }
+serde.workspace = true
+serde_json.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+which = "4"
+regex.workspace = true
+dirs = "5"

@@ -1,0 +1,92 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/dedroom-core",
+    "crates/dedroom-proxy",
+    "crates/dedroom-cli",
+    "crates/dedroom-py",
+    "crates/dedroom-parity",
+]
+default-members = ["crates/dedroom-core", "crates/dedroom-proxy", "crates/dedroom-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/Devaretanmay/dedroom"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Hashing
+blake3 = "1"
+
+# HTTP / server
+axum = "0.7"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower = "0.5"
+hyper = "1"
+http = "1"
+
+# Streaming
+tokio-stream = "0.1"
+futures = "0.3"
+bytes = "1"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+prometheus = { version = "0.13", features = ["process"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Random / UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Regex
+regex = "1"
+
+# Logging
+log = "0.4"
+
+# Cache / concurrency
+dashmap = "6"
+lru = "0.12"
+
+# Tree-sitter for code compression
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+
+# ONNX / ML
+ort = "2"
+
+# Token counting
+tiktoken-rs = "0.6"
+
+async-trait = "0.1"
+# SQLite
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Redis
+redis = { version = "0.25", features = ["tokio-comp"] }
+
+# YAML config
+humantime = "2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,27 @@
+# Rust
+target/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+*.whl
+
+# IDE
+.idea/
+*.swp
+*.swo
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config
+.env
+*.local.yaml
+
+# Generated
+Cargo.lock
