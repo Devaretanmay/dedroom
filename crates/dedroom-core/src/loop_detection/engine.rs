@@ -186,6 +186,10 @@ pub struct LoopDetector {
     adaptive: AdaptiveThreshold,
     volatile_inference: VolatileInferenceEngine,
     tool_configs: HashMap<String, ToolConfig>,
+    /// Whether persisted adaptive threshold state has been loaded.
+    adaptive_state_loaded: bool,
+    /// Counter for batching adaptive state persistence (save every N changes).
+    adaptive_save_counter: u64,
 }
 
 impl LoopDetector {
@@ -213,6 +217,8 @@ impl LoopDetector {
                 config.volatile_fields.min_occurrences as usize,
             ),
             tool_configs: ToolConfig::from_overrides(&config.tools),
+            adaptive_state_loaded: false,
+            adaptive_save_counter: 1,
         }
     }
 
@@ -233,7 +239,26 @@ impl LoopDetector {
                 config.volatile_fields.min_occurrences as usize,
             ),
             tool_configs: ToolConfig::from_overrides(&config.tools),
+            adaptive_state_loaded: false,
+            adaptive_save_counter: 1,
         }
+    }
+
+    /// Ensure persisted adaptive threshold state is loaded from the backend.
+    /// Called lazily on first use to avoid SQL query overhead at construction time.
+    fn ensure_adaptive_state_loaded(&mut self) {
+        if self.adaptive_state_loaded {
+            return;
+        }
+        let saved = self.history.load_adaptive_state();
+        if !saved.is_empty() {
+            self.adaptive.import_state(&saved);
+            tracing::info!(
+                "Restored adaptive threshold for {} tool(s) from persistent storage",
+                saved.len(),
+            );
+        }
+        self.adaptive_state_loaded = true;
     }
 
     /// Create the appropriate history backend based on configuration.
@@ -263,6 +288,9 @@ impl LoopDetector {
     /// * `tool` — the tool name (e.g. `write_file`, `search`)
     /// * `args_json` — JSON string of tool arguments
     pub fn verify(&mut self, tool: &str, args_json: &str) -> LoopVerdict {
+        // Lazy-load persisted adaptive state on first use
+        self.ensure_adaptive_state_loaded();
+
         if !self.config.enabled {
             return LoopVerdict::Allow;
         }
@@ -339,14 +367,20 @@ impl LoopDetector {
         let canonical_args = strip_volatile_fields(args_json, &configured_volatiles);
         let canonical_args = self.volatile_inference.process(tool, &canonical_args);
 
+        // Lazy-load persisted adaptive state on first use
+        self.ensure_adaptive_state_loaded();
+
         self.history.push(tool.to_string(), canonical_args, was_error);
 
-        // Feed back to adaptive threshold if error
+        // Feed back to adaptive threshold
         if was_error {
             self.adaptive.record_error(tool);
         } else {
             self.adaptive.record_success(tool);
         }
+
+        // Periodically flush all adaptive state to the backend (batched)
+        self.maybe_flush_adaptive_state();
     }
 
     /// Current loop state summary.
@@ -365,6 +399,20 @@ impl LoopDetector {
             tool_counts,
             current_max_repeats: self.adaptive.effective_max_repeats(),
         }
+    }
+
+    /// Periodically flush all adaptive threshold state to the backend.
+    /// Batches saves to amortize the SQLite write cost across many calls.
+    const ADAPTIVE_SAVE_INTERVAL: u64 = 100;
+
+    fn maybe_flush_adaptive_state(&mut self) {
+        if self.adaptive_save_counter % Self::ADAPTIVE_SAVE_INTERVAL == 0 {
+            let state = self.adaptive.export_state();
+            for (tool, err_count, succ_count) in &state {
+                self.history.save_adaptive_state(tool, *err_count, *succ_count);
+            }
+        }
+        self.adaptive_save_counter += 1;
     }
 
     /// Convert max_repeats to a block threshold based on strictness.

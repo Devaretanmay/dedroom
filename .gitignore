@@ -23,5 +23,8 @@ Thumbs.db
 .env
 *.local.yaml
 
-# Generated
-Cargo.lock
+# SQLite test databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

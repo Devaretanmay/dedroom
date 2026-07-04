@@ -42,10 +42,10 @@ impl AdaptiveThreshold {
         }
     }
 
-    /// Record an error for a tool.
-    pub fn record_error(&mut self, tool: &str) {
+    /// Record an error for a tool. Returns `true` if the effective threshold changed.
+    pub fn record_error(&mut self, tool: &str) -> bool {
         if !self.enabled {
-            return;
+            return false;
         }
         let err_count = self.error_counts.entry(tool.to_string()).or_insert(0);
         *err_count += 1;
@@ -59,12 +59,14 @@ impl AdaptiveThreshold {
             "adaptive: error on tool={}, consecutive_errors={}, effective_max={}",
             tool, err_count, effective,
         );
+        true
     }
 
     /// Record a success for a tool (resets error count).
-    pub fn record_success(&mut self, tool: &str) {
+    /// Returns `true` if the effective threshold changed (i.e., count reached 3 and was restored).
+    pub fn record_success(&mut self, tool: &str) -> bool {
         if !self.enabled {
-            return;
+            return false;
         }
         self.error_counts.remove(tool);
         let success_count = self.success_counts.entry(tool.to_string()).or_insert(0);
@@ -74,7 +76,9 @@ impl AdaptiveThreshold {
         if *success_count >= 3 {
             self.effective.remove(tool);
             self.success_counts.remove(tool);
+            return true;
         }
+        false
     }
 
     /// Get the effective max_repeats for a tool.
@@ -89,11 +93,52 @@ impl AdaptiveThreshold {
         self.effective.get(tool).copied().unwrap_or(self.base_max_repeats)
     }
 
+    /// Get the error count for a tool (for persistence).
+    pub fn error_count(&self, tool: &str) -> u32 {
+        self.error_counts.get(tool).copied().unwrap_or(0)
+    }
+
+    /// Get the success count for a tool (for persistence).
+    pub fn success_count(&self, tool: &str) -> u32 {
+        self.success_counts.get(tool).copied().unwrap_or(0)
+    }
+
     /// Reset all adaptive state.
     pub fn reset(&mut self) {
         self.error_counts.clear();
         self.success_counts.clear();
         self.effective.clear();
+    }
+
+    /// Export all per-tool counts for periodic batch persistence.
+    pub fn export_state(&self) -> Vec<(String, u32, u32)> {
+        let mut result = Vec::new();
+        for (tool, &err) in &self.error_counts {
+            let succ = self.success_counts.get(tool).copied().unwrap_or(0);
+            result.push((tool.clone(), err, succ));
+        }
+        for (tool, &succ) in &self.success_counts {
+            if !self.error_counts.contains_key(tool) {
+                result.push((tool.clone(), 0, succ));
+            }
+        }
+        result
+    }
+
+    /// Import persisted per-tool counts and recompute effectiveness.
+    pub fn import_state(&mut self, entries: &[(String, u32, u32)]) {
+        for (tool, err_count, succ_count) in entries {
+            if *err_count > 0 {
+                self.error_counts.insert(tool.clone(), *err_count);
+                // Recompute effective
+                let reduction = self.error_reduction * err_count;
+                let effective = self.base_max_repeats.saturating_sub(reduction).max(self.min_repeats);
+                self.effective.insert(tool.clone(), effective);
+            }
+            if *succ_count > 0 {
+                self.success_counts.insert(tool.clone(), *succ_count);
+            }
+        }
     }
 }
 

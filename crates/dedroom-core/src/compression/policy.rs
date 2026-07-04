@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn test_normal_state_no_special_compression() {
         let coupling = default_coupling();
-        let mut policy = CompressionPolicy::new(&coupling);
+        let policy = CompressionPolicy::new(&coupling);
         assert_eq!(policy.compression_level(), CompressionLevel::Normal);
         assert!(!policy.should_inject_hint());
         assert!(!policy.skip_identical_content());

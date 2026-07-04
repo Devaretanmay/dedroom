@@ -135,6 +135,7 @@ impl SqliteStore {
     /// Pass `":memory:"` for an in-memory database (useful in tests).
     pub fn new(path: &str, ttl_seconds: u64) -> rusqlite::Result<Self> {
         let conn = rusqlite::Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "wal")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS ccr_entries (
                 key_hash   BLOB    PRIMARY KEY NOT NULL,

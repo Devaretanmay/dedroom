@@ -28,10 +28,6 @@ fn elapsed_us(start: Instant) -> f64 {
     start.elapsed().as_nanos() as f64 / 1_000.0
 }
 
-fn elapsed_ms(start: Instant) -> f64 {
-    start.elapsed().as_nanos() as f64 / 1_000_000.0
-}
-
 fn warmup_cpu() {
     let mut x = 0u64;
     for i in 0..1_000_000 {

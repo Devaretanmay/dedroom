@@ -49,6 +49,17 @@ pub trait HistoryBackend: std::fmt::Debug + Send + Sync {
 
     /// Resize the window. Truncates oldest entries if shrinking.
     fn set_window(&mut self, new_window: usize);
+
+    /// Persist adaptive threshold state for a tool (error count, success count).
+    /// Default no-op — overridden by SQLite backend.
+    fn save_adaptive_state(&self, _tool: &str, _error_count: u32, _success_count: u32) {}
+
+    /// Load all previously persisted adaptive threshold state.
+    /// Returns `(tool, error_count, success_count)` tuples.
+    /// Default returns empty — overridden by SQLite backend.
+    fn load_adaptive_state(&self) -> Vec<(String, u32, u32)> {
+        Vec::new()
+    }
 }
 
 // ── In-memory backend ──────────────────────────────────────────────────────
@@ -142,6 +153,9 @@ pub struct SqliteHistoryTracker {
     window: usize,
     /// Push counter. Only prunes every `window` pushes to amortize the cost.
     push_counter: u64,
+    /// Whether any adaptive state has ever been persisted to the DB.
+    /// When false, `load_adaptive_state()` returns empty without any SQL query.
+    has_persisted: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "sqlite")]
@@ -152,6 +166,7 @@ impl SqliteHistoryTracker {
     pub fn new(path: &str, window: usize) -> rusqlite::Result<Self> {
         let window = window.max(1);
         let conn = rusqlite::Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "wal")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS loop_history (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,12 +176,26 @@ impl SqliteHistoryTracker {
                 created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             );
             CREATE INDEX IF NOT EXISTS idx_loop_history_lookup
-                ON loop_history (tool, canonical_args);"
+                ON loop_history (tool, canonical_args);
+            CREATE TABLE IF NOT EXISTS adaptive_state (
+                tool           TEXT    PRIMARY KEY NOT NULL,
+                error_count    INTEGER NOT NULL DEFAULT 0,
+                success_count  INTEGER NOT NULL DEFAULT 0
+            );"
         )?;
+        // Check if adaptive state has ever been persisted using PRAGMA user_version.
+        // PRAGMA user_version is a single integer in the SQLite database header —
+        // orders of magnitude cheaper than a table scan.
+        let has_persisted = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))
+            .unwrap_or(0)
+            > 0;
+
         Ok(Self {
             conn: std::sync::Mutex::new(conn),
             window,
             push_counter: 1,  // start at 1 so first prune happens after `window` pushes
+            has_persisted: std::sync::atomic::AtomicBool::new(has_persisted),
         })
     }
 
@@ -288,6 +317,50 @@ impl HistoryBackend for SqliteHistoryTracker {
     fn set_window(&mut self, new_window: usize) {
         self.window = new_window.max(1);
         self.prune();
+    }
+
+    fn save_adaptive_state(&self, tool: &str, error_count: u32, success_count: u32) {
+        if let Ok(conn) = self.conn.lock() {
+            if conn.execute(
+                "INSERT OR REPLACE INTO adaptive_state (tool, error_count, success_count) VALUES (?1, ?2, ?3)",
+                rusqlite::params![tool, error_count, success_count],
+            ).is_ok() {
+                // Set PRAGMA user_version so subsequent connections know adaptive
+                // state has been persisted (avoids querying the table on fresh DBs).
+                let _ = conn.pragma_update(None, "user_version", 1);
+                self.has_persisted.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn load_adaptive_state(&self) -> Vec<(String, u32, u32)> {
+        // Fast-path: if no adaptive state has ever been persisted, return empty
+        // without acquiring the mutex or running any SQL query.
+        if !self.has_persisted.load(std::sync::atomic::Ordering::Relaxed) {
+            return Vec::new();
+        }
+
+        let Ok(conn) = self.conn.lock() else {
+            return Vec::new();
+        };
+
+        let mut stmt = match conn.prepare(
+            "SELECT tool, error_count, success_count FROM adaptive_state"
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u32>(2)?,
+            ))
+        });
+        match rows {
+            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
     }
 }
 
