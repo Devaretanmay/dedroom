@@ -3,13 +3,14 @@
 //! Orchestrates the DedrooM pipeline on every proxied request:
 //! 1. Parse the request body to extract tool calls
 //! 2. Run each tool call through `Pipeline::process_tool_call`
-//! 3. Block or allow based on loop verdict
+//! 3. Block or allow based on loop verdict (or shadow-log in ghost mode)
 //! 4. Forward allowed calls to upstream with compressed context
-//! 5. Record telemetry and return the modified response
-
+//! 5. Record telemetry and emit events to the NDJSON log
 
 use axum::http::HeaderMap;
+use dedroom_core::ccr::hash_tool_call;
 use dedroom_core::pipeline::{Pipeline, ToolCall};
+use dedroom_core::telemetry::{EventLog, ProxyEvent};
 use serde_json::{json, Value};
 
 use crate::proxy::ProxyConfig;
@@ -161,16 +162,27 @@ pub fn extract_tool_calls_anthropic(body: &Value) -> Vec<ExtractedTool> {
 
 /// Process a set of extracted tools through the DedrooM pipeline.
 ///
+/// When `shadow_mode` is `true`, the pipeline runs in ghost mode — every
+/// tool call is processed, loop verdicts are logged to the NDJSON event
+/// stream, but NO tool calls are ever blocked. The request always passes
+/// through as if nothing happened.
+///
 /// Returns `(allowed_tools, blocked_response)` where `blocked_response` is
-/// `Some` when at least one tool call was blocked.
+/// `Some` when at least one tool call was blocked AND we are NOT in shadow
+/// mode. In shadow mode, `blocked_response` is always `None`.
 pub async fn process_tools_through_pipeline(
     pipeline: &mut Pipeline,
     tools: Vec<ExtractedTool>,
+    event_log: Option<&EventLog>,
+    session_id: Option<&str>,
+    agent_id: Option<&str>,
+    shadow_mode: bool,
 ) -> (Vec<ToolCall>, Option<Value>) {
     let mut allowed_tools = Vec::new();
     let mut blocked_tools = Vec::new();
 
     for tool in tools {
+        let t0 = std::time::Instant::now();
         let tc = ToolCall {
             name: tool.name.clone(),
             args: tool.args,
@@ -179,15 +191,90 @@ pub async fn process_tools_through_pipeline(
         };
 
         let result = pipeline.process_tool_call(&tc).await;
+        let latency_us = t0.elapsed().as_micros() as u64;
+
+        // Compute tilt_index: how close this tool is to being blocked
+        // (repeat_count / max_repeats), clamped to [0.0, 1.0].
+        let summary = pipeline.loop_state_summary();
+        let repeat_count = summary
+            .tool_counts
+            .get(&tc.name)
+            .copied()
+            .unwrap_or(0);
+        let max_repeats = pipeline.config.loop_detection.max_repeats;
+        let tilt_index = if max_repeats > 0 {
+            Some((repeat_count as f64 / max_repeats as f64).min(1.0))
+        } else {
+            None
+        };
+
+        // Extract compression stats if available
+        let (original_tokens, compressed_tokens, compression_ratio) = result
+            .compression_results
+            .first()
+            .map(|cr| {
+                let ratio = if cr.original_tokens > 0 {
+                    Some(1.0 - cr.compressed_tokens as f64 / cr.original_tokens as f64)
+                } else {
+                    None
+                };
+                (
+                    Some(cr.original_tokens),
+                    Some(cr.compressed_tokens),
+                    ratio,
+                )
+            })
+            .unwrap_or((None, None, None));
+
+        // Determine verdict string
+        let verdict_str = if result.loop_verdict.is_blocked() {
+            if result.injection_hint.is_some() {
+                "inject"
+            } else {
+                "block"
+            }
+        } else {
+            "allow"
+        };
+
+        // Compute args_hash using the same BLAKE3 hash as CCR
+        let args_hash = hash_tool_call(&tc.name, &tc.args).to_hex().to_string();
+
+        // Emit event if event_log is available
+        if let Some(log) = event_log {
+            log.record(ProxyEvent {
+                timestamp: EventLog::now_millis(),
+                session_id: session_id.map(|s| s.to_string()),
+                agent_id: agent_id.map(|s| s.to_string()),
+                tool_name: tc.name.clone(),
+                args_hash: Some(args_hash),
+                verdict: verdict_str.to_string(),
+                compression_ratio,
+                original_tokens,
+                compressed_tokens,
+                tilt_index,
+                latency_us,
+            });
+        }
 
         if result.loop_verdict.is_blocked() {
+            if shadow_mode {
+                // Ghost mode: log the block but still allow the tool through
+                tracing::debug!(
+                    "[shadow] would block {} ({:?}) — passing through",
+                    tc.name,
+                    result.loop_verdict
+                );
+                allowed_tools.push(tc.clone());
+            }
             blocked_tools.push((tc, result));
         } else {
             allowed_tools.push(tc);
         }
     }
 
-    let blocked_response = if blocked_tools.is_empty() {
+    let blocked_response = if blocked_tools.is_empty() || shadow_mode {
+        // In shadow mode we NEVER return a blocked response
         None
     } else {
         Some(build_blocked_response(&blocked_tools, pipeline))
@@ -351,11 +438,23 @@ pub fn get_session_id(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Determine the agent identifier from request headers.
+///
+/// Checks `x-agent-id` first, falls back to `User-Agent`.
+pub fn get_agent_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-agent-id")
+        .or_else(|| headers.get("user-agent"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use dedroom_core::loop_detection::LoopVerdict;
     use serde_json::json;
+    use std::io::BufRead;
 
     #[test]
     fn test_extract_tool_calls_openai() {
@@ -426,7 +525,7 @@ mod tests {
         use dedroom_core::DedrooMConfig;
 
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config);
+        let pipeline = Pipeline::new(config);
 
         let blocked = vec![(
             ToolCall {
@@ -448,6 +547,201 @@ mod tests {
         assert_eq!(
             resp["blocked_calls"][0]["tool"],
             "write_file"
+        );
+    }
+
+    /// Verifies that `process_tools_through_pipeline` with `shadow_mode=true`:
+    /// 1. Returns ALL tool calls as "allowed" even when loop detection would block them
+    /// 2. Returns `None` for blocked_response (no 429 response is returned)
+    /// 3. Writes events to the NDJSON event log capturing the real verdicts
+    #[tokio::test]
+    async fn test_shadow_mode_passes_through_blocked_calls() {
+        use dedroom_core::DedrooMConfig;
+
+        // ── Setup: low max_repeats so we hit a block quickly ────────────
+
+        let yaml = r#"
+            loop_detection:
+              max_repeats: 3
+              adaptive:
+                enabled: true
+                error_reduction: 1
+                min_repeats: 2
+        "#;
+        let config = DedrooMConfig::from_yaml_str(yaml).unwrap();
+        let mut pipeline = Pipeline::new(config);
+
+        // ── Setup: tempdir-backed event log ─────────────────────────────
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("shadow-test.ndjson");
+        let event_log = EventLog::start_with_path(log_path.clone());
+
+        // ── Build 4 identical error-producing tool calls ────────────────
+        // With max_repeats=3 and errors, calls 3+ should be blocked.
+
+        let tools: Vec<ExtractedTool> = (0..4)
+            .map(|_| ExtractedTool {
+                name: "write_file".into(),
+                args: r#"{"path":"/tmp/test.txt"}"#.into(),
+                result: Some("error: permission denied".into()),
+                is_error: true,
+            })
+            .collect();
+
+        // ── Process with shadow_mode = true ─────────────────────────────
+
+        let (allowed_tools, blocked_response) = process_tools_through_pipeline(
+            &mut pipeline,
+            tools,
+            Some(&event_log),
+            Some("test-session"),
+            Some("test-agent"),
+            true, // shadow_mode = true
+        )
+        .await;
+
+        // ── Assertions ──────────────────────────────────────────────────
+
+        // 1. ALL 4 tools are returned as allowed (shadow bypasses blocks)
+        assert_eq!(
+            allowed_tools.len(),
+            4,
+            "shadow mode should return ALL tools as allowed, not just the first 2"
+        );
+        assert_eq!(allowed_tools[0].name, "write_file");
+        assert_eq!(allowed_tools[3].name, "write_file");
+
+        // 2. blocked_response is None (no 429 returned in shadow mode)
+        assert!(
+            blocked_response.is_none(),
+            "shadow mode must NOT return a blocked response"
+        );
+
+        // 3. The event log captured all 4 events with correct verdicts
+        // Give the background thread time to flush
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        let file = std::fs::File::open(&log_path).unwrap();
+        let reader = std::io::BufReader::new(file);
+        let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
+
+        assert_eq!(lines.len(), 4, "event log should have 4 entries");
+
+        // Parse each line and check verdicts
+        let events: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        // First call allowed
+        assert_eq!(
+            events[0]["verdict"].as_str().unwrap(),
+            "allow",
+            "first tool call should be allowed"
+        );
+        // Second call allowed (history has 1 entry, threshold still high)
+        assert_eq!(
+            events[1]["verdict"].as_str().unwrap(),
+            "allow",
+            "second tool call should be allowed"
+        );
+        // Third+ calls blocked — error-causing calls trigger the injection
+        // hint, so verdict is "inject" rather than bare "block"
+        assert_eq!(
+            events[2]["verdict"].as_str().unwrap(),
+            "inject",
+            "third tool call should be blocked with injection hint"
+        );
+        assert_eq!(
+            events[3]["verdict"].as_str().unwrap(),
+            "inject",
+            "fourth tool call should be blocked with injection hint"
+        );
+
+        // Verify session_id and agent_id are in the log
+        assert_eq!(
+            events[0]["session_id"].as_str().unwrap(),
+            "test-session"
+        );
+        assert_eq!(
+            events[0]["agent_id"].as_str().unwrap(),
+            "test-agent"
+        );
+
+        // Verify tilt_index: should increase as repeat count grows
+        let tilt_0 = events[0]["tilt_index"].as_f64().unwrap();
+        let tilt_3 = events[3]["tilt_index"].as_f64().unwrap();
+        assert!(
+            tilt_3 > tilt_0,
+            "tilt_index should increase from first to fourth call ({} -> {})",
+            tilt_0,
+            tilt_3
+        );
+
+        // args_hash should be present and deterministic for identical calls
+        let hash_0 = events[0]["args_hash"].as_str().unwrap();
+        let hash_1 = events[1]["args_hash"].as_str().unwrap();
+        assert_eq!(hash_0, hash_1, "identical calls should have same args_hash");
+        assert!(!hash_0.is_empty(), "args_hash should be a non-empty hex string");
+    }
+
+    /// Verifies that `process_tools_through_pipeline` WITHOUT shadow mode
+    /// still blocks tools normally (regression guard).
+    #[tokio::test]
+    async fn test_normal_mode_still_blocks() {
+        use dedroom_core::DedrooMConfig;
+
+        let yaml = r#"
+            loop_detection:
+              max_repeats: 3
+              adaptive:
+                enabled: true
+                error_reduction: 1
+                min_repeats: 2
+        "#;
+        let config = DedrooMConfig::from_yaml_str(yaml).unwrap();
+        let mut pipeline = Pipeline::new(config);
+
+        let tools: Vec<ExtractedTool> = (0..4)
+            .map(|_| ExtractedTool {
+                name: "read_file".into(),
+                args: r#"{"path":"/tmp/secret.txt"}"#.into(),
+                result: Some("access denied".into()),
+                is_error: true,
+            })
+            .collect();
+
+        // shadow_mode = false — normal blocking behavior
+        let (allowed_tools, blocked_response) = process_tools_through_pipeline(
+            &mut pipeline,
+            tools,
+            None,   // no event log
+            None,   // no session
+            None,   // no agent
+            false,  // shadow_mode = false
+        )
+        .await;
+
+        // Only the first 2 should be allowed (max_repeats=3, errors collapse threshold)
+        assert_eq!(
+            allowed_tools.len(),
+            2,
+            "normal mode should only allow first 2 calls, rest blocked"
+        );
+
+        // blocked_response should be Some with details
+        assert!(
+            blocked_response.is_some(),
+            "normal mode should return a blocked response"
+        );
+
+        let resp = blocked_response.unwrap();
+        assert_eq!(resp["error"], "tool_loop_detected");
+        assert_eq!(
+            resp["blocked_calls"].as_array().unwrap().len(),
+            2,
+            "should have 2 blocked calls"
         );
     }
 }

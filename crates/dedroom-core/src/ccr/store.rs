@@ -212,7 +212,7 @@ impl CcrBackend for SqliteStore {
 
         // Amortize expired-entry cleanup: only prune every 100 puts.
         let prev = self.put_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if prev % 100 == 0 {
+        if prev.is_multiple_of(100) {
             self.prune_expired();
         }
     }

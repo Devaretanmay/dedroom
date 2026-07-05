@@ -262,10 +262,11 @@ impl LoopDetector {
     }
 
     /// Create the appropriate history backend based on configuration.
+    #[allow(unused_variables)]
     fn create_history_backend(config: &LoopDetectionConfig, window: usize) -> Box<dyn HistoryBackend> {
         #[cfg(feature = "sqlite")]
         if config.history_backend == "sqlite" {
-            let path = config.history_path.as_deref().unwrap_or("loop_history.db");
+            let path = config.history_path.as_deref().unwrap_or(":memory:");
             match crate::loop_detection::SqliteHistoryTracker::new(path, window) {
                 Ok(sqlite) => {
                     tracing::info!("Loop detection history using SQLite backend: {path}");
@@ -406,7 +407,7 @@ impl LoopDetector {
     const ADAPTIVE_SAVE_INTERVAL: u64 = 100;
 
     fn maybe_flush_adaptive_state(&mut self) {
-        if self.adaptive_save_counter % Self::ADAPTIVE_SAVE_INTERVAL == 0 {
+        if self.adaptive_save_counter.is_multiple_of(Self::ADAPTIVE_SAVE_INTERVAL) {
             let state = self.adaptive.export_state();
             for (tool, err_count, succ_count) in &state {
                 self.history.save_adaptive_state(tool, *err_count, *succ_count);

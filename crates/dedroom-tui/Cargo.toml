@@ -1,0 +1,17 @@
+[package]
+name = "dedroom-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DedrooM event dashboard — tails the SSE stream with a live ratatui terminal UI"
+
+[dependencies]
+ratatui = "0.28"
+crossterm = "0.28"
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+tracing.workspace = true
+anyhow.workspace = true

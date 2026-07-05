@@ -6,8 +6,9 @@ members = [
     "crates/dedroom-cli",
     "crates/dedroom-py",
     "crates/dedroom-parity",
+    "crates/dedroom-tui",
 ]
-default-members = ["crates/dedroom-core", "crates/dedroom-proxy", "crates/dedroom-cli"]
+default-members = ["crates/dedroom-core", "crates/dedroom-proxy", "crates/dedroom-cli", "crates/dedroom-tui"]
 
 [workspace.package]
 version = "0.1.0"

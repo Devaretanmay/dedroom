@@ -233,7 +233,7 @@ impl HistoryBackend for SqliteHistoryTracker {
         // Only prune every `window` pushes to amortize the cost.
         // The `count_repeats` query already uses `LIMIT window` so
         // correctness is unaffected by extra rows in the DB.
-        if self.push_counter % self.window as u64 == 0 {
+        if self.push_counter.is_multiple_of(self.window as u64) {
             self.prune();
         }
         self.push_counter += 1;
@@ -302,10 +302,7 @@ impl HistoryBackend for SqliteHistoryTracker {
             })
         });
 
-        match rows {
-            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
-            Err(_) => Vec::new(),
-        }
+        rows.ok().map_or_else(Vec::new, |iter| iter.filter_map(|r| r.ok()).collect())
     }
 
     fn clear(&mut self) {
@@ -320,16 +317,14 @@ impl HistoryBackend for SqliteHistoryTracker {
     }
 
     fn save_adaptive_state(&self, tool: &str, error_count: u32, success_count: u32) {
-        if let Ok(conn) = self.conn.lock() {
-            if conn.execute(
+        if let Ok(conn) = self.conn.lock()
+            && conn.execute(
                 "INSERT OR REPLACE INTO adaptive_state (tool, error_count, success_count) VALUES (?1, ?2, ?3)",
                 rusqlite::params![tool, error_count, success_count],
-            ).is_ok() {
-                // Set PRAGMA user_version so subsequent connections know adaptive
-                // state has been persisted (avoids querying the table on fresh DBs).
-                let _ = conn.pragma_update(None, "user_version", 1);
-                self.has_persisted.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
+            ).is_ok()
+        {
+            let _ = conn.pragma_update(None, "user_version", 1);
+            self.has_persisted.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -357,10 +352,7 @@ impl HistoryBackend for SqliteHistoryTracker {
                 row.get::<_, u32>(2)?,
             ))
         });
-        match rows {
-            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
-            Err(_) => Vec::new(),
-        }
+        rows.ok().map_or_else(Vec::new, |iter| iter.filter_map(|r| r.ok()).collect())
     }
 }
 
@@ -530,8 +522,8 @@ mod tests {
 
             let entries = h.snapshot();
             assert_eq!(entries.len(), 2);
-            assert_eq!(entries[0].was_error, false);
-            assert_eq!(entries[1].was_error, true);
+            assert!(!entries[0].was_error);
+            assert!(entries[1].was_error);
         }
     }
 

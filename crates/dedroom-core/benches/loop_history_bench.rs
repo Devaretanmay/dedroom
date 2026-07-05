@@ -156,7 +156,7 @@ fn bench_mixed_in_memory(c: &mut Criterion) {
                 let mut h = populate_in_memory(w, w);
                 let mut step = 0u64;
                 b.iter(|| {
-                    if step % 2 == 0 {
+                    if step.is_multiple_of(2) {
                         h.push(
                             black_box("write_file".into()),
                             black_box(r#"{"path":"/tmp/x.txt"}"#.into()),
@@ -175,9 +175,7 @@ fn bench_mixed_in_memory(c: &mut Criterion) {
         );
     }
     group.finish();
-}
-
-fn bench_mixed_sqlite(c: &mut Criterion) {
+}    fn bench_mixed_sqlite(c: &mut Criterion) {
     #[cfg(feature = "sqlite")]
     {
         let mut group = c.benchmark_group("mixed (50% push, 50% count) / sqlite (memory)");
@@ -189,7 +187,7 @@ fn bench_mixed_sqlite(c: &mut Criterion) {
                     let mut h = populate_sqlite(w, w);
                     let mut step = 0u64;
                     b.iter(|| {
-                        if step % 2 == 0 {
+                        if step.is_multiple_of(2) {
                             h.push(
                                 black_box("write_file".into()),
                                 black_box(r#"{"path":"/tmp/x.txt"}"#.into()),

@@ -20,18 +20,28 @@ pub async fn chat_completions(
     JsonExtractor(body): JsonExtractor<Value>,
 ) -> impl IntoResponse {
     let session_id = intercept::get_session_id(&headers);
+    let agent_id = intercept::get_agent_id(&headers);
 
     // Extract tools synchronously before holding the pipeline lock
     let tools = intercept::extract_tool_calls_openai(&body);
 
+    let shadow_mode = state.proxy_config.shadow_mode;
+
     // Lock the pipeline and process tools
     let pipeline = state.get_or_create_pipeline(session_id.as_deref()).await;
     let mut pipeline_guard = pipeline.lock().await;
-    let (_allowed, blocked) =
-        intercept::process_tools_through_pipeline(&mut pipeline_guard, tools).await;
+    let (_allowed, blocked) = intercept::process_tools_through_pipeline(
+        &mut pipeline_guard,
+        tools,
+        Some(&state.event_log),
+        session_id.as_deref(),
+        agent_id.as_deref(),
+        shadow_mode,
+    )
+    .await;
     drop(pipeline_guard);
 
-    if let Some(blocked_resp) = blocked {
+    if !shadow_mode && let Some(blocked_resp) = blocked {
         return (StatusCode::TOO_MANY_REQUESTS, Json(blocked_resp)).into_response();
     }
 
@@ -67,15 +77,24 @@ pub async fn messages(
     JsonExtractor(body): JsonExtractor<Value>,
 ) -> impl IntoResponse {
     let session_id = intercept::get_session_id(&headers);
+    let agent_id = intercept::get_agent_id(&headers);
+    let shadow_mode = state.proxy_config.shadow_mode;
     let tools = intercept::extract_tool_calls_anthropic(&body);
 
     let pipeline = state.get_or_create_pipeline(session_id.as_deref()).await;
     let mut pipeline_guard = pipeline.lock().await;
-    let (_allowed, blocked) =
-        intercept::process_tools_through_pipeline(&mut pipeline_guard, tools).await;
+    let (_allowed, blocked) = intercept::process_tools_through_pipeline(
+        &mut pipeline_guard,
+        tools,
+        Some(&state.event_log),
+        session_id.as_deref(),
+        agent_id.as_deref(),
+        shadow_mode,
+    )
+    .await;
     drop(pipeline_guard);
 
-    if let Some(blocked_resp) = blocked {
+    if !shadow_mode && let Some(blocked_resp) = blocked {
         return (StatusCode::TOO_MANY_REQUESTS, Json(blocked_resp)).into_response();
     }
 
@@ -155,6 +174,78 @@ pub async fn stats(
             "session_count": state.sessions.lock().await.len(),
         },
     }))
+}
+
+/// GET /admin/events — return recent events from the in-memory ring buffer.
+///
+/// Returns the last 100 events as a JSON array, plus metadata.
+/// Zero I/O — reads from the EventLog's ring buffer populated during `record()`.
+pub async fn events(
+    Extension(state): Extension<Arc<AppState>>,
+) -> impl IntoResponse {
+    let max_events = 100usize;
+    let recent = state.event_log.recent_events(max_events);
+    let total_events = state.event_log.event_count();
+
+    let events: Vec<Value> = recent
+        .iter()
+        .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+        .collect();
+
+    Json(json!({
+        "events": events,
+        "total_events": total_events,
+        "returned": events.len(),
+        "ring_capacity": 1000,
+        "file_path": state.event_log.path().to_string_lossy(),
+    }))
+    .into_response()
+}
+
+/// GET /admin/events/stream — SSE stream of live events.
+///
+/// Subscribes to the EventLog broadcast channel and pushes each event
+/// as an SSE `data:` frame as it is recorded. The connection stays open
+/// until the client disconnects.
+pub async fn events_stream(
+    Extension(state): Extension<Arc<AppState>>,
+) -> impl IntoResponse {
+    let rx = state.event_log.subscribe();
+
+    // Use unfold to convert the broadcast receiver into a stream without
+    // requiring tokio-stream's sync feature.
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let json_line = match serde_json::to_string(&event) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    return Some((
+                        Ok::<_, std::convert::Infallible>(
+                            axum::response::sse::Event::default().data(json_line),
+                        ),
+                        rx,
+                    ));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("[events/stream] client lagged by {n} events");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::debug!("[events/stream] channel closed, ending stream");
+                    return None;
+                }
+            }
+        }
+    });
+
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("keep-alive"),
+    )
 }
 
 /// POST /admin/runtime-env — update configuration at runtime.

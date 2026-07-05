@@ -24,3 +24,6 @@ bytes.workspace = true
 serde_yaml.workspace = true
 hyper.workspace = true
 http.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

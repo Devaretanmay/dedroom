@@ -16,10 +16,11 @@ const _: fn() = || {
     assert_sync::<proxy::AppState>();
 };
 
-fn parse_args() -> (u16, PathBuf) {
+fn parse_args() -> (u16, PathBuf, bool) {
     let args: Vec<String> = std::env::args().collect();
     let mut port = 8080u16;
     let mut config_path = PathBuf::from("dedroom.yaml");
+    let mut shadow_mode = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -36,12 +37,15 @@ fn parse_args() -> (u16, PathBuf) {
                     config_path = PathBuf::from(&args[i]);
                 }
             }
+            "--shadow" => {
+                shadow_mode = true;
+            }
             _ => {}
         }
         i += 1;
     }
 
-    (port, config_path)
+    (port, config_path, shadow_mode)
 }
 
 #[tokio::main]
@@ -52,7 +56,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Parse CLI args
-    let (port, config_path) = parse_args();
+    let (port, config_path, shadow_mode) = parse_args();
+
+    if shadow_mode {
+        tracing::info!("🧛 Shadow (ghost) mode enabled — will not block any calls");
+    }
 
     tracing::info!(
         "DedrooM proxy starting — config: {}, port: {}",
@@ -72,7 +80,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Build Pipeline and proxy state
-    let state = proxy::AppState::new(config);
+    let mut state = proxy::AppState::new(config);
+    state.proxy_config.shadow_mode = shadow_mode;
 
     // Build router
     let router = proxy::ProxyRouter::new(state).build();

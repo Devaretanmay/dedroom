@@ -6,7 +6,6 @@
 /// Run: cargo run --example bench
 ///
 /// Results are printed as a markdown table for easy reading.
-
 use std::time::Instant;
 
 use dedroom_core::config::{
@@ -95,17 +94,18 @@ fn gen_large_json_array(size: usize) -> String {
 }
 
 fn gen_code(size: usize) -> String {
-    let mut lines = Vec::new();
-    lines.push("use std::collections::HashMap;".to_string());
-    lines.push("use std::sync::Arc;".to_string());
-    lines.push(String::new());
-    lines.push("#[derive(Debug, Clone)]".to_string());
-    lines.push("pub struct Data {".to_string());
-    lines.push("    pub id: u64,".to_string());
-    lines.push("    pub name: String,".to_string());
-    lines.push("    pub values: Vec<f64>,".to_string());
-    lines.push("}".to_string());
-    lines.push(String::new());
+    let mut lines = vec![
+        "use std::collections::HashMap;".to_string(),
+        "use std::sync::Arc;".to_string(),
+        String::new(),
+        "#[derive(Debug, Clone)]".to_string(),
+        "pub struct Data {".to_string(),
+        "    pub id: u64,".to_string(),
+        "    pub name: String,".to_string(),
+        "    pub values: Vec<f64>,".to_string(),
+        "}".to_string(),
+        String::new(),
+    ];
 
     for i in 0..size {
         lines.push(format!(
@@ -117,9 +117,10 @@ fn gen_code(size: usize) -> String {
         lines.push("    }".to_string());
         lines.push("    let mut results = Vec::with_capacity(input.len());".to_string());
         lines.push("    for item in input {".to_string());
-        lines.push(format!(
+        lines.push(
             "        let avg = item.values.iter().sum::<f64>() / item.values.len() as f64;"
-        ));
+                .to_string(),
+        );
         lines.push("        results.push(avg);".to_string());
         lines.push("    }".to_string());
         lines.push("    Ok(results)".to_string());
@@ -613,7 +614,7 @@ fn bench_compression_quality() {
 // ── MAIN ──────────────────────────────────────────────────────────────────
 
 fn main() {
-    println!("{}", "╔".to_string() + &"═".repeat(68) + "╗");
+    println!("╔{}", "═".repeat(68) + "╗");
     println!("║  DedrooM Performance Benchmarks                                    ║");
     println!("║  Rust edition 2024 — real measurements, no simulations              ║");
     println!("╚{}╝", "═".repeat(68));

@@ -1,6 +1,5 @@
 /// Quick compression quality check for CodeCompressor with tree-sitter.
 /// Run: cargo run --example compression_quality
-
 use dedroom_core::compression::{compress_code, estimate_tokens};
 
 fn check(label: &str, language: &str, code: &str) {

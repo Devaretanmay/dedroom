@@ -9,6 +9,8 @@ use dedroom_core::config::DedrooMConfig;
 use dedroom_core::pipeline::Pipeline;
 use tokio::sync::Mutex;
 
+use dedroom_core::telemetry::EventLog;
+
 use crate::handlers;
 
 /// Upstream provider configuration.
@@ -22,6 +24,9 @@ pub struct ProxyConfig {
     pub api_key: Option<String>,
     /// Whether to force non-streaming upstream and re-wrap as SSE.
     pub force_sse: bool,
+    /// Shadow mode: run the full pipeline but never block or modify
+    /// requests. Logs what would have happened to the NDJSON event log.
+    pub shadow_mode: bool,
 }
 
 impl Default for ProxyConfig {
@@ -31,6 +36,7 @@ impl Default for ProxyConfig {
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             api_key: None,
             force_sse: true,
+            shadow_mode: false,
         }
     }
 }
@@ -46,15 +52,19 @@ pub struct AppState {
     pub sessions: Arc<Mutex<HashMap<String, Arc<Mutex<Pipeline>>>>>,
     /// Default pipeline for requests without a session header.
     pub default_pipeline: Arc<Mutex<Pipeline>>,
+    /// Background NDJSON event logger.
+    pub event_log: EventLog,
 }
 
 impl AppState {
     pub fn new(config: DedrooMConfig) -> Self {
+        let event_log = EventLog::start();
         Self {
             default_pipeline: Arc::new(Mutex::new(Pipeline::new(config.clone()))),
             config,
             proxy_config: ProxyConfig::default(),
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            event_log,
         }
     }
 
@@ -112,6 +122,8 @@ impl ProxyRouter {
             .route("/v1/messages", post(handlers::messages))
             .route("/health", get(handlers::health))
             .route("/admin/stats", get(handlers::stats))
+            .route("/admin/events", get(handlers::events))
+            .route("/admin/events/stream", get(handlers::events_stream))
             .route("/admin/runtime-env", post(handlers::runtime_env))
             .layer(Extension(self.state.clone()))
     }
