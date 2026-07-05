@@ -4,23 +4,52 @@ build-backend = "maturin"
 
 [project]
 name = "dedroom"
-version = "0.1.0"
-description = "Unified agent runtime: loop detection + context compression"
-readme = "README.md"
+version = "0.4.0"
+description = "Unified agent runtime: loop detection + context compression for AI coding agents"
+readme = "python/README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 authors = [
     { name = "DedrooM contributors" },
 ]
 
+keywords = [
+    "ai-agent", "claude-code", "copilot", "codex", "aider", "cursor", "cline",
+    "loop-detection", "context-compression", "proxy", "token-savings",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = []
+
 [project.urls]
 repository = "https://github.com/Devaretanmay/dedroom"
+homepage = "https://github.com/Devaretanmay/dedroom"
+documentation = "https://github.com/Devaretanmay/dedroom#readme"
+
+[project.scripts]
+dedroom = "dedroom.cli:main"
 
 [project.optional-dependencies]
 all = []
 dev = ["pytest", "pytest-asyncio"]
 
 [tool.maturin]
+manifest-path = "crates/dedroom-py/Cargo.toml"
 features = ["pyo3/extension-module"]
 python-source = "python"
 module-name = "dedroom._core"
+# Include bundled CLI binaries in the wheel
+include = [
+    "dedroom/bin/*",
+]

@@ -13,7 +13,7 @@ use dedroom_core::pipeline::{Pipeline, ToolCall};
 
 /// Build an in-memory Pipeline.
 fn make_pipeline_in_memory() -> Pipeline {
-    Pipeline::new(DedrooMConfig::default())
+    Pipeline::new(DedrooMConfig::default(, None))
 }
 
 /// Build a SQLite-backed Pipeline (uses `:memory:` databases).
@@ -31,7 +31,7 @@ fn make_pipeline_sqlite() -> Pipeline {
             ttl_seconds: 3600
     "#;
     let config = DedrooMConfig::from_yaml_str(yaml).unwrap();
-    Pipeline::new(config)
+    Pipeline::new(config, None)
 }
 
 /// Build a Pipeline backed by on-disk SQLite databases in a temp directory.
@@ -55,7 +55,7 @@ fn make_pipeline_ondisk(db_dir: &std::path::Path) -> Pipeline {
         ccr = ccr_path.display(),
     );
     let config = DedrooMConfig::from_yaml_str(&yaml).unwrap();
-    Pipeline::new(config)
+    Pipeline::new(config, None)
 }
 
 /// A tool call with a small result that triggers compression and CCR writes.
@@ -92,7 +92,7 @@ fn bench_pipeline_allow_in_memory(c: &mut Criterion) {
     group.bench_function(BenchmarkId::from_parameter("pipeline"), |b| {
         b.iter(|| {
             let mut pipeline = make_pipeline_in_memory();
-            let result = rt.block_on(pipeline.process_tool_call(&tool_call_no_result()));
+            let result = rt.block_on(pipeline.process_tool_call(&tool_call_no_result(, None)));
             black_box(result);
         });
     });
@@ -110,7 +110,7 @@ fn bench_pipeline_allow_sqlite(c: &mut Criterion) {
         group.bench_function(BenchmarkId::from_parameter("pipeline"), |b| {
             b.iter(|| {
                 let mut pipeline = make_pipeline_sqlite();
-                let result = rt.block_on(pipeline.process_tool_call(&tool_call_no_result()));
+                let result = rt.block_on(pipeline.process_tool_call(&tool_call_no_result(, None)));
                 black_box(result);
             });
         });
@@ -135,7 +135,7 @@ fn bench_pipeline_compress_in_memory(c: &mut Criterion) {
     group.bench_function(BenchmarkId::from_parameter("pipeline"), |b| {
         b.iter(|| {
             let mut pipeline = make_pipeline_in_memory();
-            let result = rt.block_on(pipeline.process_tool_call(&tool_call_with_result()));
+            let result = rt.block_on(pipeline.process_tool_call(&tool_call_with_result(, None)));
             black_box(result);
         });
     });
@@ -153,7 +153,7 @@ fn bench_pipeline_compress_sqlite(c: &mut Criterion) {
         group.bench_function(BenchmarkId::from_parameter("pipeline"), |b| {
             b.iter(|| {
                 let mut pipeline = make_pipeline_sqlite();
-                let result = rt.block_on(pipeline.process_tool_call(&tool_call_with_result()));
+                let result = rt.block_on(pipeline.process_tool_call(&tool_call_with_result(, None)));
                 black_box(result);
             });
         });
@@ -184,12 +184,12 @@ fn bench_pipeline_warm_in_memory(c: &mut Criterion) {
             result: Some("result".into()),
             is_error: false,
         };
-        rt.block_on(pipeline.process_tool_call(&t));
+        rt.block_on(pipeline.process_tool_call(&t, None));
     }
 
     group.bench_function("warm pipeline", |b| {
         b.iter(|| {
-            let result = rt.block_on(pipeline.process_tool_call(&tool_call_no_result()));
+            let result = rt.block_on(pipeline.process_tool_call(&tool_call_no_result(, None)));
             black_box(result);
         });
     });
@@ -213,12 +213,12 @@ fn bench_pipeline_warm_sqlite(c: &mut Criterion) {
                 result: Some("result".into()),
                 is_error: false,
             };
-            rt.block_on(pipeline.process_tool_call(&t));
+            rt.block_on(pipeline.process_tool_call(&t, None));
         }
 
         group.bench_function("warm pipeline", |b| {
             b.iter(|| {
-                let result = rt.block_on(pipeline.process_tool_call(&tool_call_no_result()));
+                let result = rt.block_on(pipeline.process_tool_call(&tool_call_no_result(, None)));
                 black_box(result);
             });
         });
@@ -246,7 +246,7 @@ fn bench_pipeline_allow_ondisk(c: &mut Criterion) {
         group.bench_function("pipeline", |b| {
             b.iter(|| {
                 let mut pipeline = make_pipeline_ondisk(dir.path());
-                let result = rt.block_on(pipeline.process_tool_call(&tool_call_no_result()));
+                let result = rt.block_on(pipeline.process_tool_call(&tool_call_no_result(, None)));
                 black_box(result);
             });
         });
@@ -274,7 +274,7 @@ fn bench_pipeline_compress_ondisk(c: &mut Criterion) {
         group.bench_function("pipeline", |b| {
             b.iter(|| {
                 let mut pipeline = make_pipeline_ondisk(dir.path());
-                let result = rt.block_on(pipeline.process_tool_call(&tool_call_with_result()));
+                let result = rt.block_on(pipeline.process_tool_call(&tool_call_with_result(, None)));
                 black_box(result);
             });
         });
@@ -308,12 +308,12 @@ fn bench_pipeline_warm_ondisk(c: &mut Criterion) {
                 result: Some("result".into()),
                 is_error: false,
             };
-            rt.block_on(pipeline.process_tool_call(&t));
+            rt.block_on(pipeline.process_tool_call(&t, None));
         }
 
         group.bench_function("warm pipeline", |b| {
             b.iter(|| {
-                let result = rt.block_on(pipeline.process_tool_call(&tool_call_no_result()));
+                let result = rt.block_on(pipeline.process_tool_call(&tool_call_no_result(, None)));
                 black_box(result);
             });
         });

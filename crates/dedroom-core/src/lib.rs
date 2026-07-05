@@ -28,6 +28,7 @@ pub mod telemetry;
 pub mod security;
 pub mod attribution;
 pub mod pipeline;
+pub mod intelligence;
 
 // Re-export the top-level API
 pub use config::DedrooMConfig;

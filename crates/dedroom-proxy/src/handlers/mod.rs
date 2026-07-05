@@ -25,11 +25,22 @@ pub async fn chat_completions(
     // Extract tools synchronously before holding the pipeline lock
     let tools = intercept::extract_tool_calls_openai(&body);
 
-    let shadow_mode = state.proxy_config.shadow_mode;
+    let shadow_mode = state.proxy_config.read().await.shadow_mode;
 
     // Lock the pipeline and process tools
     let pipeline = state.get_or_create_pipeline(session_id.as_deref()).await;
     let mut pipeline_guard = pipeline.lock().await;
+
+    // Check trust score and dynamically throttle if untrusted
+    let mut original_max_repeats = None;
+    if let Some(id) = agent_id.as_deref() {
+        if !pipeline_guard.trust_verification.is_trusted(id).await {
+            // Agent has a low trust score! Throttle to a max of 1 repeat.
+            original_max_repeats = Some(pipeline_guard.config.loop_detection.max_repeats);
+            pipeline_guard.config.loop_detection.max_repeats = 1;
+            pipeline_guard.loop_detector.config.max_repeats = 1;
+        }
+    }
     let (_allowed, blocked) = intercept::process_tools_through_pipeline(
         &mut pipeline_guard,
         tools,
@@ -39,17 +50,25 @@ pub async fn chat_completions(
         shadow_mode,
     )
     .await;
+    // Restore max_repeats if throttled
+    if let Some(orig) = original_max_repeats {
+        pipeline_guard.config.loop_detection.max_repeats = orig;
+        pipeline_guard.loop_detector.config.max_repeats = orig;
+    }
+    
     drop(pipeline_guard);
 
     if !shadow_mode && let Some(blocked_resp) = blocked {
         return (StatusCode::TOO_MANY_REQUESTS, Json(blocked_resp)).into_response();
     }
 
+    let proxy_cfg = state.proxy_config.read().await.clone();
+
     match intercept::forward_to_upstream(
         &headers,
         body,
         intercept::Provider::OpenAI,
-        &state.proxy_config,
+        &proxy_cfg,
     )
     .await
     {
@@ -60,7 +79,7 @@ pub async fn chat_completions(
                 intercept::record_upstream_response(&mut pipeline_guard, &upstream_resp, &[]).await;
             drop(pipeline_guard);
 
-            if state.proxy_config.force_sse {
+            if proxy_cfg.force_sse {
                 make_sse_response(StatusCode::OK, modified)
             } else {
                 (StatusCode::OK, Json(modified)).into_response()
@@ -78,7 +97,7 @@ pub async fn messages(
 ) -> impl IntoResponse {
     let session_id = intercept::get_session_id(&headers);
     let agent_id = intercept::get_agent_id(&headers);
-    let shadow_mode = state.proxy_config.shadow_mode;
+    let shadow_mode = state.proxy_config.read().await.shadow_mode;
     let tools = intercept::extract_tool_calls_anthropic(&body);
 
     let pipeline = state.get_or_create_pipeline(session_id.as_deref()).await;
@@ -98,11 +117,13 @@ pub async fn messages(
         return (StatusCode::TOO_MANY_REQUESTS, Json(blocked_resp)).into_response();
     }
 
+    let proxy_cfg = state.proxy_config.read().await.clone();
+
     match intercept::forward_to_upstream(
         &headers,
         body,
         intercept::Provider::Anthropic,
-        &state.proxy_config,
+        &proxy_cfg,
     )
     .await
     {
@@ -112,7 +133,7 @@ pub async fn messages(
                 intercept::record_upstream_response(&mut pipeline_guard, &upstream_resp, &[]).await;
             drop(pipeline_guard);
 
-            if state.proxy_config.force_sse {
+            if proxy_cfg.force_sse {
                 make_sse_response(StatusCode::OK, modified)
             } else {
                 (StatusCode::OK, Json(modified)).into_response()
@@ -143,6 +164,59 @@ pub async fn health(
     }))
 }
 
+/// GET /v1/models — dynamic model discovery proxy.
+///
+/// Forwards the model list request to the upstream `openai_base_url`.
+/// Uses the proxy's configured API key if present, otherwise passes through
+/// the `Authorization` header from the client (e.g. OpenCode UI).
+pub async fn models(
+    Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let proxy_cfg = state.proxy_config.read().await.clone();
+    
+    let base_clean = proxy_cfg.openai_base_url.trim_end_matches('/');
+    let base_clean = if base_clean.ends_with("/v1") {
+        base_clean.strip_suffix("/v1").unwrap()
+    } else {
+        base_clean
+    };
+    
+    let url = format!("{}/v1/models", base_clean);
+
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url);
+
+    // Use proxy's API key if available, otherwise forward client's header
+    if let Some(ref key) = proxy_cfg.api_key {
+        req = req.header("authorization", format!("Bearer {}", key));
+    } else if let Some(auth) = headers
+        .get("authorization")
+        .or_else(|| headers.get("x-api-key"))
+    {
+        req = req.header("authorization", auth);
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            match resp.json::<Value>().await {
+                Ok(body) => (status, Json(body)).into_response(),
+                Err(e) => (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("Failed to parse JSON from upstream: {}", e) })),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("Failed to fetch models from upstream: {}", e) })),
+        )
+            .into_response(),
+    }
+}
+
 /// GET /admin/attribution — token attribution, waste breakdown, and ROI tracking.
 ///
 /// Returns a detailed report with per-tool breakdown, waste categorization,
@@ -165,7 +239,11 @@ pub async fn stats(
     let pipeline = state.default_pipeline.lock().await;
     let report = pipeline.savings_report();
     let summary = pipeline.loop_state_summary();
+    let global_trust_stats = pipeline.trust_verification.store.get_global_stats().await.unwrap_or(json!({}));
     drop(pipeline);
+
+    let cfg = state.config.read().await.clone();
+    let sessions_len = state.sessions.lock().await.len();
 
     Json(json!({
         "savings": {
@@ -184,9 +262,12 @@ pub async fn stats(
             "total_calls": summary.total_calls,
             "tool_counts": summary.tool_counts,
         },
+        "intelligence": {
+            "trust_verification": global_trust_stats,
+        },
         "config": {
-            "max_repeats": state.config.loop_detection.max_repeats,
-            "session_count": state.sessions.lock().await.len(),
+            "max_repeats": cfg.loop_detection.max_repeats,
+            "session_count": sessions_len,
         },
     }))
 }
@@ -268,24 +349,26 @@ pub async fn runtime_env(
     Extension(state): Extension<Arc<AppState>>,
     JsonExtractor(update): JsonExtractor<RuntimeEnvUpdate>,
 ) -> impl IntoResponse {
-    let mut state_clone = (*state).clone();
-
+    let mut p_config = state.proxy_config.write().await;
+    
     if let Some(ref url) = update.openai_base_url {
-        state_clone.proxy_config.openai_base_url = url.clone();
+        p_config.openai_base_url = url.clone();
     }
     if let Some(ref url) = update.anthropic_base_url {
-        state_clone.proxy_config.anthropic_base_url = url.clone();
+        p_config.anthropic_base_url = url.clone();
     }
     if let Some(ref key) = update.api_key {
-        state_clone.proxy_config.api_key = Some(key.clone());
+        p_config.api_key = Some(key.clone());
     }
     if let Some(force_sse) = update.force_sse {
-        state_clone.proxy_config.force_sse = force_sse;
+        p_config.force_sse = force_sse;
     }
+    drop(p_config); // drop lock before updating config
+
     if let Some(max_repeats) = update.max_repeats {
-        let mut cfg = state_clone.config.clone();
+        let mut cfg = state.config.read().await.clone();
         cfg.loop_detection.max_repeats = max_repeats;
-        state_clone.update_config(cfg);
+        state.update_config(cfg).await;
     }
 
     tracing::info!("Runtime config update applied: {update:?}");

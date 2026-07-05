@@ -24,6 +24,8 @@ use dedroom_core::compression::{
 use dedroom_core::config::DedrooMConfig;
 use dedroom_core::loop_detection::{LoopDetector, LoopVerdict};
 use dedroom_core::pipeline::{Pipeline, ToolCall};
+use dedroom_core::intelligence::store::{IntelligenceStore, InMemoryIntelligenceStore};
+use std::sync::Arc;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -85,7 +87,8 @@ impl DedrooM {
         let config = DedrooMConfig::from_yaml_str(config_yaml)
             .map_err(|e| PyValueError::new_err(format!("Invalid configuration YAML: {e}")))?;
 
-        let pipeline = Pipeline::new(config);
+        let store: Arc<dyn IntelligenceStore> = Arc::new(InMemoryIntelligenceStore::new());
+        let pipeline = Pipeline::new(config, Some(store));
 
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create async runtime: {e}")))?;
@@ -136,13 +139,15 @@ impl DedrooM {
     ///     args: JSON string of tool arguments.
     ///     result: Tool output content (may be empty).
     ///     is_error: Whether the tool call resulted in an error.
-    #[pyo3(signature = (tool, args, result="", is_error=false))]
+    #[pyo3(signature = (tool, args, result="", is_error=false, agent_id=None, agent_thought=None))]
     fn process_tool<'py>(
         &mut self,
         tool: &str,
         args: &str,
         result: &str,
         is_error: bool,
+        agent_id: Option<String>,
+        agent_thought: Option<String>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let tool_call = ToolCall {
@@ -156,9 +161,13 @@ impl DedrooM {
             is_error,
         };
 
+        if let Some(thought) = agent_thought {
+            self.pipeline.judgment_preservation.extract_reflection(&thought);
+        }
+
         let pipeline_result = self
             .runtime
-            .block_on(self.pipeline.process_tool_call(&tool_call));
+            .block_on(self.pipeline.process_tool_call(&tool_call, agent_id.as_deref()));
 
         let compressed = pipeline_result
             .compression_results

@@ -16,11 +16,13 @@ const _: fn() = || {
     assert_sync::<proxy::AppState>();
 };
 
-fn parse_args() -> (u16, PathBuf, bool) {
+fn parse_args() -> (u16, PathBuf, bool, Option<String>, Option<String>) {
     let args: Vec<String> = std::env::args().collect();
     let mut port = 8080u16;
     let mut config_path = PathBuf::from("dedroom.yaml");
     let mut shadow_mode = false;
+    let mut api_key = None;
+    let mut upstream_url = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -40,12 +42,24 @@ fn parse_args() -> (u16, PathBuf, bool) {
             "--shadow" => {
                 shadow_mode = true;
             }
+            "--api-key" => {
+                i += 1;
+                if i < args.len() {
+                    api_key = Some(args[i].clone());
+                }
+            }
+            "--upstream-url" => {
+                i += 1;
+                if i < args.len() {
+                    upstream_url = Some(args[i].clone());
+                }
+            }
             _ => {}
         }
         i += 1;
     }
 
-    (port, config_path, shadow_mode)
+    (port, config_path, shadow_mode, api_key, upstream_url)
 }
 
 #[tokio::main]
@@ -56,10 +70,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Parse CLI args
-    let (port, config_path, shadow_mode) = parse_args();
+    let (port, config_path, shadow_mode, api_key, upstream_url) = parse_args();
 
     if shadow_mode {
-        tracing::info!("🧛 Shadow (ghost) mode enabled — will not block any calls");
+        tracing::info!("[SHADOW] Shadow (ghost) mode enabled — will not block any calls");
     }
 
     tracing::info!(
@@ -80,8 +94,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Build Pipeline and proxy state
-    let mut state = proxy::AppState::new(config);
-    state.proxy_config.shadow_mode = shadow_mode;
+    let state = proxy::AppState::new(config, shadow_mode, api_key, upstream_url);
 
     // Build router
     let router = proxy::ProxyRouter::new(state).build();

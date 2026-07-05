@@ -1147,12 +1147,12 @@ async fn wrap_cursor(port: u16, config: &Path) -> Result<()> {
     if find_cursor_location().is_some() {
         // Auto-inject settings
         if let Err(e) = inject_cursor_settings(port) {
-            eprintln!("  ⚠️  Settings injection failed: {e}");
+            eprintln!("  [WARN] Settings injection failed: {e}");
         }
 
         // Launch Cursor
         if let Err(e) = launch_cursor_app() {
-            eprintln!("  ⚠️  Could not launch Cursor: {e}");
+            eprintln!("  [WARN] Could not launch Cursor: {e}");
             eprintln!();
             eprintln!("  To launch Cursor manually and use the proxy:");
             eprintln!("    OpenAI Override Base URL: {}", openai_url);
@@ -1290,7 +1290,7 @@ fn inject_cline_settings(port: u16) -> Result<()> {
     }
 
     std::fs::write(&settings_file, serde_json::to_string_pretty(&settings)?)?;
-    eprintln!("  ✅ Proxy settings injected into {}", settings_file.display());
+    eprintln!("  [OK] Proxy settings injected into {}", settings_file.display());
     Ok(())
 }
 
@@ -1328,7 +1328,7 @@ async fn wrap_cline(port: u16, config: &Path) -> Result<()> {
     if find_cline_location().is_some() {
         // Auto-inject settings into VS Code
         if let Err(e) = inject_cline_settings(port) {
-            eprintln!("  ⚠️  Settings injection failed: {e}");
+            eprintln!("  [WARN] Settings injection failed: {e}");
         }
 
         // Launch VS Code
@@ -1340,8 +1340,8 @@ async fn wrap_cline(port: u16, config: &Path) -> Result<()> {
                 .stderr(Stdio::null())
                 .spawn()
             {
-                Ok(_) => eprintln!("  🚀 Launched VS Code"),
-                Err(e) => eprintln!("  ⚠️  Could not launch VS Code: {e}"),
+                Ok(_) => eprintln!("  [OK] Launched VS Code"),
+                Err(e) => eprintln!("  [WARN] Could not launch VS Code: {e}"),
             }
         }
         #[cfg(not(target_os = "macos"))]
@@ -1353,7 +1353,7 @@ async fn wrap_cline(port: u16, config: &Path) -> Result<()> {
                     .stderr(Stdio::null())
                     .spawn()
                 {
-                    Ok(_) => eprintln!("  🚀 Launched VS Code"),
+                    Ok(_) => eprintln!("  [OK] Launched VS Code"),
                     Err(_) => {}
                 }
             }
@@ -1469,17 +1469,17 @@ async fn unwrap_agent(agent: &str, port: u16) -> Result<()> {
             if freed {
                 eprintln!("  Stopped local DedrooM proxy on port {}.", port);
             } else {
-                eprintln!("  Warning: failed to stop DedrooM proxy on port {}; stop it manually.", port);
+                eprintln!("  [WARN] Warning: failed to stop DedrooM proxy on port {}; stop it manually.", port);
             }
         } else {
-            eprintln!("  Warning: port {} is in use, but it did not look like DedrooM; left it running.", port);
+            eprintln!("  [WARN] Warning: port {} is in use, but it did not look like DedrooM; left it running.", port);
         }
     } else {
         eprintln!("  No local DedrooM proxy detected on port {}.", port);
     }
 
     eprintln!();
-    eprintln!("✓ {} is no longer durably wrapped by DedrooM.", capitalize(agent));
+    eprintln!("[OK] {} is no longer durably wrapped by DedrooM.", capitalize(agent));
     eprintln!();
     Ok(())
 }
@@ -1975,11 +1975,11 @@ fn render_doctor(checks: &[CheckResult], port: u16, version: &str) {
 
     for check in checks {
         let glyph = match check.status.as_str() {
-            PASS => "✓",
-            WARN => "⚠",
-            FAIL => "✗",
-            SKIP => "·",
-            _ => "?",
+            PASS => "PASS",
+            WARN => "WARN",
+            FAIL => "FAIL",
+            SKIP => "SKIP",
+            _ => "UNKNOWN",
         };
         eprintln!("  {} {}  {}", glyph, check.status.to_uppercase(), check.name);
         eprintln!("         {}", check.summary);
@@ -1995,7 +1995,7 @@ fn render_doctor(checks: &[CheckResult], port: u16, version: &str) {
     if fails > 0 || warns > 0 {
         eprintln!("  {} failure(s), {} warning(s)", fails, warns);
     } else {
-        eprintln!("  All checks passed ✓");
+        eprintln!("  All checks passed [OK]");
     }
 }
 

@@ -445,7 +445,7 @@ fn bench_pipeline() {
     // 4a. First call (allow + compress)
     {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config);
+        let mut pipeline = Pipeline::new(config, None);
 
         let json = gen_large_json_array(100);
         let tool = ToolCall {
@@ -456,7 +456,7 @@ fn bench_pipeline() {
         };
 
         bench_mean_by(50, "Pipeline: first call (allow + compress)", || {
-            let result = rt.block_on(pipeline.process_tool_call(&tool));
+            let result = rt.block_on(pipeline.process_tool_call(&tool, None));
             std::hint::black_box(result.loop_verdict.to_code())
         });
     }
@@ -464,7 +464,7 @@ fn bench_pipeline() {
     // 4b. Loop detection through pipeline (block)
     {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config);
+        let mut pipeline = Pipeline::new(config, None);
 
         let tool = ToolCall {
             name: "write_file".into(),
@@ -475,11 +475,11 @@ fn bench_pipeline() {
 
         // Prime the loop detector
         for _ in 0..3 {
-            let _ = rt.block_on(pipeline.process_tool_call(&tool));
+            let _ = rt.block_on(pipeline.process_tool_call(&tool, None));
         }
 
         bench_mean_by(50, "Pipeline: block on 4th repeat", || {
-            let result = rt.block_on(pipeline.process_tool_call(&tool));
+            let result = rt.block_on(pipeline.process_tool_call(&tool, None));
             std::hint::black_box(if result.loop_verdict.is_blocked() { 1u8 } else { 0u8 })
         });
     }
@@ -487,7 +487,7 @@ fn bench_pipeline() {
     // 4c. Full pipeline with large result
     {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config);
+        let mut pipeline = Pipeline::new(config, None);
 
         let json = gen_large_json_array(1000);
         let tool = ToolCall {
@@ -497,7 +497,7 @@ fn bench_pipeline() {
             is_error: false,
         };
         bench_mean_by(20, "Pipeline: 1000-row result (allow + compress)", || {
-            let result = rt.block_on(pipeline.process_tool_call(&tool));
+            let result = rt.block_on(pipeline.process_tool_call(&tool, None));
             std::hint::black_box(result.compression_results.len() as u8)
         });
     }
@@ -505,7 +505,7 @@ fn bench_pipeline() {
     // 4d. Pipeline with error loop (hint injection)
     {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config);
+        let mut pipeline = Pipeline::new(config, None);
 
         let tool = ToolCall {
             name: "write_file".into(),
@@ -515,18 +515,18 @@ fn bench_pipeline() {
         };
 
         for _ in 0..4 {
-            let _ = rt.block_on(pipeline.process_tool_call(&tool));
+            let _ = rt.block_on(pipeline.process_tool_call(&tool, None));
         }
 
         bench_mean_by(50, "Pipeline: error loop (block + hint)", || {
-            let result = rt.block_on(pipeline.process_tool_call(&tool));
+            let result = rt.block_on(pipeline.process_tool_call(&tool, None));
             std::hint::black_box(result.injection_hint.is_some() as u8)
         });
     }
 
     // 4e. Savings ledger recording speed
     {
-        let mut pipeline = Pipeline::new(DedrooMConfig::default());
+        let mut pipeline = Pipeline::new(DedrooMConfig::default(), None);
 
         let tool = ToolCall {
             name: "read_file".into(),
@@ -536,7 +536,7 @@ fn bench_pipeline() {
         };
 
         bench_mean_by(200, "Pipeline: savings recording", || {
-            let result = rt.block_on(pipeline.process_tool_call(&tool));
+            let result = rt.block_on(pipeline.process_tool_call(&tool, None));
             std::hint::black_box(result.loop_verdict.to_code())
         });
     }

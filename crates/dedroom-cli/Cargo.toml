@@ -16,3 +16,7 @@ anyhow.workspace = true
 which = "4"
 regex.workspace = true
 dirs = "5"
+
+[[bin]]
+name = "dedroom"
+path = "src/main.rs"

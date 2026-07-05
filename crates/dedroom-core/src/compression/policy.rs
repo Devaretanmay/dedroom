@@ -46,6 +46,8 @@ pub struct CompressionPolicy {
     coupling: LoopCompressionCoupling,
     /// Number of recent messages to leave uncompressed in recovery mode.
     fresh_context_window: usize,
+    /// Quality score representing how well compression is preserving intent (0.0 to 1.0).
+    quality_score: f64,
 }
 
 impl CompressionPolicy {
@@ -55,11 +57,19 @@ impl CompressionPolicy {
             loop_state: LoopState::None,
             coupling: coupling.clone(),
             fresh_context_window: coupling.on_recovery.fresh_context_window,
+            quality_score: 1.0,
         }
     }
 
     /// Update the current loop state.
     pub fn set_loop_state(&mut self, state: LoopState) {
+        if state == LoopState::ErrorLoop {
+            // Decrement quality score on error loop, since compression might be causing it
+            self.quality_score = (self.quality_score - 0.1).max(0.0);
+        } else if state == LoopState::None {
+            // Gradually recover quality score
+            self.quality_score = (self.quality_score + 0.05).min(1.0);
+        }
         self.loop_state = state;
     }
 
@@ -73,7 +83,7 @@ impl CompressionPolicy {
         if !self.coupling.enabled {
             return CompressionLevel::Normal;
         }
-        match self.loop_state {
+        let level = match self.loop_state {
             LoopState::None => CompressionLevel::Normal,
             LoopState::Detected => {
                 self.coupling.on_detected.compression_budget.into()
@@ -84,6 +94,18 @@ impl CompressionPolicy {
             LoopState::Recovering => {
                 self.coupling.on_recovery.compression_budget.into()
             }
+        };
+
+        // Downgrade compression aggressiveness if quality score is low
+        if self.quality_score < 0.5 {
+            match level {
+                CompressionLevel::Maximum => CompressionLevel::Aggressive,
+                CompressionLevel::Aggressive => CompressionLevel::Moderate,
+                CompressionLevel::Moderate => CompressionLevel::Normal,
+                CompressionLevel::Normal => CompressionLevel::Normal,
+            }
+        } else {
+            level
         }
     }
 

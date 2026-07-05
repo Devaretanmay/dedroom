@@ -390,8 +390,21 @@ fn is_function_start(trimmed: &str, language: &str) -> bool {
         return false;
     }
 
+    let modifiers = ["pub ", "pub(crate) ", "pub(super) ", "async ", "export ", "default ", "static "];
+    let mut stripped = trimmed;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for m in modifiers.iter() {
+            if stripped.starts_with(m) {
+                stripped = stripped[m.len()..].trim_start();
+                changed = true;
+            }
+        }
+    }
+
     for kw in fn_keywords {
-        if !kw.is_empty() && trimmed.starts_with(kw) {
+        if !kw.is_empty() && stripped.starts_with(kw) {
             return true;
         }
     }

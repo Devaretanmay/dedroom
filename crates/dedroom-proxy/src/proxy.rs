@@ -7,7 +7,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use dedroom_core::config::DedrooMConfig;
 use dedroom_core::pipeline::Pipeline;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use dedroom_core::telemetry::EventLog;
 
@@ -45,9 +45,9 @@ impl Default for ProxyConfig {
 #[derive(Debug, Clone)]
 pub struct AppState {
     /// Base DedrooM configuration used to create new pipelines.
-    pub config: DedrooMConfig,
+    pub config: Arc<RwLock<DedrooMConfig>>,
     /// Proxy-level configuration (upstream URLs, etc.).
-    pub proxy_config: ProxyConfig,
+    pub proxy_config: Arc<RwLock<ProxyConfig>>,
     /// Per-session pipeline instances, keyed by x-session-id.
     pub sessions: Arc<Mutex<HashMap<String, Arc<Mutex<Pipeline>>>>>,
     /// Default pipeline for requests without a session header.
@@ -57,12 +57,23 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: DedrooMConfig) -> Self {
+    pub fn new(config: DedrooMConfig, shadow_mode: bool, api_key: Option<String>, upstream_url: Option<String>) -> Self {
         let event_log = EventLog::start();
+        let mut proxy_config = ProxyConfig {
+            shadow_mode,
+            api_key,
+            ..Default::default()
+        };
+
+        if let Some(url) = upstream_url {
+            proxy_config.openai_base_url = url.clone();
+            proxy_config.anthropic_base_url = url;
+        }
+
         Self {
-            default_pipeline: Arc::new(Mutex::new(Pipeline::new(config.clone()))),
-            config,
-            proxy_config: ProxyConfig::default(),
+            default_pipeline: Arc::new(Mutex::new(Pipeline::new(config.clone(), None))),
+            config: Arc::new(RwLock::new(config)),
+            proxy_config: Arc::new(RwLock::new(proxy_config)),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             event_log,
         }
@@ -74,10 +85,11 @@ impl AppState {
     pub async fn get_or_create_pipeline(&self, session_id: Option<&str>) -> Arc<Mutex<Pipeline>> {
         match session_id {
             Some(id) => {
+                let config_clone = self.config.read().await.clone();
                 let mut sessions = self.sessions.lock().await;
                 sessions
                     .entry(id.to_string())
-                    .or_insert_with(|| Arc::new(Mutex::new(Pipeline::new(self.config.clone()))))
+                    .or_insert_with(|| Arc::new(Mutex::new(Pipeline::new(config_clone, None))))
                     .clone()
             }
             None => self.default_pipeline.clone(),
@@ -85,9 +97,12 @@ impl AppState {
     }
 
     /// Update the base configuration and rebuild the default pipeline.
-    pub fn update_config(&mut self, new_config: DedrooMConfig) {
-        self.config = new_config.clone();
-        self.default_pipeline = Arc::new(Mutex::new(Pipeline::new(new_config.clone())));
+    pub async fn update_config(&self, new_config: DedrooMConfig) {
+        let mut config_write = self.config.write().await;
+        *config_write = new_config.clone();
+        
+        let mut default_pipeline = self.default_pipeline.lock().await;
+        *default_pipeline = Pipeline::new(new_config.clone(), None);
         // Existing sessions keep their old config; only the default is replaced.
     }
 }
@@ -120,6 +135,7 @@ impl ProxyRouter {
                 post(handlers::chat_completions),
             )
             .route("/v1/messages", post(handlers::messages))
+            .route("/v1/models", get(handlers::models))
             .route("/health", get(handlers::health))
             .route("/admin/stats", get(handlers::stats))
             .route("/admin/events", get(handlers::events))

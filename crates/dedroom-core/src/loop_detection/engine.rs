@@ -180,7 +180,7 @@ impl ToolConfig {
 /// instances from shared config.
 #[derive(Debug)]
 pub struct LoopDetector {
-    config: LoopDetectionConfig,
+    pub config: LoopDetectionConfig,
     history: Box<dyn HistoryBackend>,
     rule_engine: RuleEngine,
     adaptive: AdaptiveThreshold,
@@ -395,11 +395,26 @@ impl LoopDetector {
                 acc
             });
 
+        let tilt_index = self.tilt_index();
         LoopStateSummary {
             total_calls,
             tool_counts,
             current_max_repeats: self.adaptive.effective_max_repeats(),
+            tilt_index,
         }
+    }
+
+    /// Calculates the 'Tilt Index' (0.0 to 1.0) which measures how frustrated/stuck
+    /// the agent appears to be. A high tilt index (e.g. > 0.7) means the agent is
+    /// rapidly failing and likely looping on errors.
+    pub fn tilt_index(&self) -> f64 {
+        let history = self.history.snapshot();
+        if history.is_empty() {
+            return 0.0;
+        }
+
+        let total_errors = history.iter().filter(|e| e.was_error).count();
+        total_errors as f64 / history.len() as f64
     }
 
     /// Periodically flush all adaptive threshold state to the backend.
@@ -432,6 +447,7 @@ pub struct LoopStateSummary {
     pub total_calls: usize,
     pub tool_counts: HashMap<String, usize>,
     pub current_max_repeats: u32,
+    pub tilt_index: f64,
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

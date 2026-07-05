@@ -17,6 +17,8 @@ use crate::ccr::{CcrStore, hash_tool_call};
 use crate::telemetry::{SavingsLedger, CompressionSaving, LoopBlockSaving};
 use crate::security::RedactionEngine;
 use crate::attribution::{AttributionEngine, ToolCallAttribution};
+use crate::intelligence::{MentorMode, TrustVerification, IntelligenceStore, InMemoryIntelligenceStore, JudgmentPreservation, CrossSessionLearning};
+use std::sync::Arc;
 
 /// A tool call intercepted by the pipeline.
 #[derive(Debug, Clone)]
@@ -54,11 +56,16 @@ pub struct Pipeline {
     pub savings_ledger: SavingsLedger,
     pub redaction_engine: RedactionEngine,
     pub attribution_engine: AttributionEngine,
+    pub mentor: MentorMode,
+    pub trust_verification: TrustVerification,
+    pub judgment_preservation: JudgmentPreservation,
+    pub cross_session_learning: CrossSessionLearning,
 }
 
 impl Pipeline {
     /// Create a new pipeline from configuration with default components.
-    pub fn new(config: DedrooMConfig) -> Self {
+    pub fn new(config: DedrooMConfig, intelligence_store: Option<Arc<dyn IntelligenceStore>>) -> Self {
+        let store = intelligence_store.unwrap_or_else(|| Arc::new(InMemoryIntelligenceStore::new()));
         let ccr = Self::create_ccr_store(&config);
         let redaction_config = crate::security::RedactionConfig {
             enabled: config.security.redaction_enabled,
@@ -81,6 +88,10 @@ impl Pipeline {
             savings_ledger: SavingsLedger::new(),
             redaction_engine: RedactionEngine::new(redaction_config),
             attribution_engine: AttributionEngine::new(),
+            mentor: MentorMode::new(true), // Enable mentor mode by default
+            trust_verification: TrustVerification::new(store.clone()),
+            judgment_preservation: JudgmentPreservation::new(),
+            cross_session_learning: CrossSessionLearning::new(store),
         }
     }
 
@@ -126,7 +137,7 @@ impl Pipeline {
     /// Process a tool call through the full pipeline.
     ///
     /// Returns the loop verdict and (if allowed) the compressed result.
-    pub async fn process_tool_call(&mut self, tool: &ToolCall) -> PipelineResult {
+    pub async fn process_tool_call(&mut self, tool: &ToolCall, agent_id: Option<&str>) -> PipelineResult {
         // 1. Run loop detection
         let verdict = self.loop_detector.verify(&tool.name, &tool.args);
 
@@ -144,12 +155,22 @@ impl Pipeline {
             }
             LoopVerdict::Warn | LoopVerdict::BlockRetry => {
                 if tool.is_error {
+                    if let Some(err_msg) = &tool.result {
+                        self.cross_session_learning.record_failure(&tool.name, err_msg, "Error loop detected").await;
+                    }
                     LoopState::ErrorLoop
                 } else {
                     LoopState::Detected
                 }
             }
-            LoopVerdict::BlockHalt => LoopState::ErrorLoop,
+            LoopVerdict::BlockHalt => {
+                if tool.is_error {
+                    if let Some(err_msg) = &tool.result {
+                        self.cross_session_learning.record_failure(&tool.name, err_msg, "Fatal error loop detected").await;
+                    }
+                }
+                LoopState::ErrorLoop
+            }
         };
         self.compression_policy.set_loop_state(loop_state);
 
@@ -166,12 +187,35 @@ impl Pipeline {
                     tool.result.as_deref().unwrap_or(""),
                 ),
             });
-            let hint = if self.compression_policy.should_inject_hint() {
+            let mut hint = if self.compression_policy.should_inject_hint() {
                 self.compression_policy.hint_template()
                     .map(|t| t.replace("{tool}", &tool.name))
             } else {
                 None
             };
+            
+            // Check Mentor Mode for proactive coaching based on tilt_index
+            let summary = self.loop_detector.state_summary();
+            if let Some(mentor_hint) = self.mentor.generate_coaching_hint(summary.tilt_index) {
+                if let Some(h) = &mut hint {
+                    h.push_str("\n\n");
+                    h.push_str(&mentor_hint);
+                } else {
+                    hint = Some(mentor_hint);
+                }
+            }
+            
+            // Query CrossSessionLearning for proactive hints for this tool
+            let hints = self.cross_session_learning.get_proactive_hints(&tool.name).await;
+            if !hints.is_empty() {
+                let formatted_hints = format!("Wisdom from past sessions for `{}`:\n- {}", tool.name, hints.join("\n- "));
+                if let Some(h) = &mut hint {
+                    h.push_str("\n\n");
+                    h.push_str(&formatted_hints);
+                } else {
+                    hint = Some(formatted_hints);
+                }
+            }
             // Record attribution for blocked call
             let blocked_tokens = estimate_tokens(tool.result.as_deref().unwrap_or(""));
             let latency = t0.elapsed().as_micros() as u64;
@@ -186,6 +230,9 @@ impl Pipeline {
                 content_type: "blocked".into(),
                 latency_us: latency,
             });
+            if let Some(id) = agent_id {
+                self.trust_verification.update_score(id, false).await;
+            }
             return PipelineResult {
                 messages: Vec::new(),
                 loop_verdict: verdict,
@@ -248,6 +295,15 @@ impl Pipeline {
         let latency = t0.elapsed().as_micros() as u64;
         let is_uncompressible = original_tokens == compressed_tokens && original_tokens > 0;
 
+        if let Some(id) = agent_id {
+            // Reward trust if the tool call succeeded and was not an error
+            if !tool.is_error {
+                self.trust_verification.update_score(id, true).await;
+            } else {
+                self.trust_verification.update_score(id, false).await;
+            }
+        }
+        
         let tokens_saved = if is_uncompressible {
             // Still count as saved from redaction perspective but mark waste
             0
@@ -357,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_allows_first_call() {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config);
+        let mut pipeline = Pipeline::new(config, None);
 
         let tool = ToolCall {
             name: "write_file".into(),
@@ -365,14 +421,14 @@ mod tests {
             result: Some("wrote 10 bytes".into()),
             is_error: false,
         };
-        let result = pipeline.process_tool_call(&tool).await;
+        let result = pipeline.process_tool_call(&tool, None).await;
         assert_eq!(result.loop_verdict, LoopVerdict::Allow);
     }
 
     #[tokio::test]
     async fn test_pipeline_blocks_loop() {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config);
+        let mut pipeline = Pipeline::new(config, None);
 
         let tool = ToolCall {
             name: "write_file".into(),
@@ -385,20 +441,20 @@ mod tests {
         // After each error the effective threshold drops by error_reduction (floored at
         // min_repeats=2).  So by the time 2 entries are in history the threshold is 2
         // and the 3rd call is blocked.
-        let r1 = pipeline.process_tool_call(&tool).await;
+        let r1 = pipeline.process_tool_call(&tool, None).await;
         assert_eq!(r1.loop_verdict, LoopVerdict::Allow);
-        let r2 = pipeline.process_tool_call(&tool).await;
+        let r2 = pipeline.process_tool_call(&tool, None).await;
         assert_eq!(r2.loop_verdict, LoopVerdict::Allow);
 
         // 3rd call should now be blocked (adaptive tightened the threshold)
-        let r3 = pipeline.process_tool_call(&tool).await;
+        let r3 = pipeline.process_tool_call(&tool, None).await;
         assert!(r3.loop_verdict.is_blocked());
     }
 
     #[tokio::test]
     async fn test_pipeline_stores_ccr() {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config);
+        let mut pipeline = Pipeline::new(config, None);
 
         let tool = ToolCall {
             name: "search".into(),
@@ -406,7 +462,7 @@ mod tests {
             result: Some("result 1\nresult 2\nresult 3".into()),
             is_error: false,
         };
-        let result = pipeline.process_tool_call(&tool).await;
+        let result = pipeline.process_tool_call(&tool, None).await;
         assert_eq!(result.loop_verdict, LoopVerdict::Allow);
 
         // Check CCR has stored the original
@@ -419,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_tracks_savings() {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config);
+        let mut pipeline = Pipeline::new(config, None);
 
         let tool = ToolCall {
             name: "read_file".into(),
@@ -427,7 +483,7 @@ mod tests {
             result: Some("line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7".into()),
             is_error: false,
         };
-        let _ = pipeline.process_tool_call(&tool).await;
+        let _ = pipeline.process_tool_call(&tool, None).await;
 
         let report = pipeline.savings_report();
         assert!(report.total_original_tokens > 0);
@@ -466,7 +522,7 @@ mod tests {
 
         // ── Session 1: populate both backends ────────────────────────────
 
-        let mut pipeline1 = Pipeline::new(config.clone());
+        let mut pipeline1 = Pipeline::new(config.clone(), None);
 
         let tool = ToolCall {
             name: "write_file".into(),
@@ -476,13 +532,13 @@ mod tests {
         };
 
         // Push 3 identical error calls — 3rd should be blocked
-        let r1 = pipeline1.process_tool_call(&tool).await;
+        let r1 = pipeline1.process_tool_call(&tool, None).await;
         assert_eq!(r1.loop_verdict, LoopVerdict::Allow);
 
-        let r2 = pipeline1.process_tool_call(&tool).await;
+        let r2 = pipeline1.process_tool_call(&tool, None).await;
         assert_eq!(r2.loop_verdict, LoopVerdict::Allow);
 
-        let r3 = pipeline1.process_tool_call(&tool).await;
+        let r3 = pipeline1.process_tool_call(&tool, None).await;
         assert!(r3.loop_verdict.is_blocked(), "3rd call should be blocked");
 
         // Process a tool with a result to populate CCR
@@ -492,7 +548,7 @@ mod tests {
             result: Some("result line 1\nresult line 2\nresult line 3".into()),
             is_error: false,
         };
-        let r4 = pipeline1.process_tool_call(&search_tool).await;
+        let r4 = pipeline1.process_tool_call(&search_tool, None).await;
         assert_eq!(r4.loop_verdict, LoopVerdict::Allow);
 
         // Verify state in session 1
@@ -509,7 +565,7 @@ mod tests {
         // ── Simulate restart: drop pipeline1, create pipeline2 ────────────
         drop(pipeline1);
 
-        let mut pipeline2 = Pipeline::new(config);
+        let mut pipeline2 = Pipeline::new(config, None);
 
         // ── Session 2: verify persistence BEFORE making any calls ─────────
 
@@ -524,7 +580,7 @@ mod tests {
 
         // Loop detection: same tool call should be blocked immediately
         // (history has 3 identical entries, threshold = max_repeats = 3)
-        let r_after = pipeline2.process_tool_call(&tool).await;
+        let r_after = pipeline2.process_tool_call(&tool, None).await;
         assert!(
             r_after.loop_verdict.is_blocked(),
             "Loop detection should persist: same call blocked after restart"
@@ -548,7 +604,7 @@ mod tests {
             result: Some("ok".into()),
             is_error: false,
         };
-        let r_new = pipeline2.process_tool_call(&new_tool).await;
+        let r_new = pipeline2.process_tool_call(&new_tool, None).await;
         assert_eq!(
             r_new.loop_verdict,
             LoopVerdict::Allow,
@@ -559,7 +615,7 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_injects_hint_on_error_loop() {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config);
+        let mut pipeline = Pipeline::new(config, None);
 
         let tool = ToolCall {
             name: "write_file".into(),
@@ -570,9 +626,9 @@ mod tests {
 
         // Error loop should trigger hint injection
         for _ in 0..4 {
-            let _ = pipeline.process_tool_call(&tool).await;
+            let _ = pipeline.process_tool_call(&tool, None).await;
         }
-        let result = pipeline.process_tool_call(&tool).await;
+        let result = pipeline.process_tool_call(&tool, None).await;
         if result.loop_verdict.is_blocked() {
             assert!(result.injection_hint.is_some());
         }

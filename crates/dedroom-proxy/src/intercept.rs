@@ -29,6 +29,7 @@ pub struct ExtractedTool {
     pub args: String,
     pub result: Option<String>,
     pub is_error: bool,
+    pub agent_thought: Option<String>,
 }
 
 /// Extract tool calls from an OpenAI-formatted request body.
@@ -41,6 +42,7 @@ pub fn extract_tool_calls_openai(body: &Value) -> Vec<ExtractedTool> {
         for msg in messages {
             // Assistant messages may contain tool_calls
             if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
+                let assistant_content = msg.get("content").and_then(|c| c.as_str()).map(|s| s.to_string());
                 for tc in tool_calls {
                     let name = tc
                         .get("function")
@@ -59,6 +61,7 @@ pub fn extract_tool_calls_openai(body: &Value) -> Vec<ExtractedTool> {
                         args,
                         result: None,
                         is_error: false,
+                        agent_thought: assistant_content.clone(),
                     });
                 }
             }
@@ -98,8 +101,18 @@ pub fn extract_tool_calls_anthropic(body: &Value) -> Vec<ExtractedTool> {
 
     if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
         for msg in messages {
-            if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
-                for block in content {
+            if let Some(content_blocks) = msg.get("content").and_then(|c| c.as_array()) {
+                let mut assistant_content = String::new();
+                for block in content_blocks {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            assistant_content.push_str(text);
+                            assistant_content.push('\n');
+                        }
+                    }
+                }
+                
+                for block in content_blocks {
                     let block_type = block
                         .get("type")
                         .and_then(|t| t.as_str())
@@ -121,6 +134,7 @@ pub fn extract_tool_calls_anthropic(body: &Value) -> Vec<ExtractedTool> {
                                 args,
                                 result: None,
                                 is_error: false,
+                                agent_thought: if assistant_content.is_empty() { None } else { Some(assistant_content.clone()) },
                             });
                         }
                         "tool_result" => {
@@ -190,7 +204,12 @@ pub async fn process_tools_through_pipeline(
             is_error: tool.is_error,
         };
 
-        let result = pipeline.process_tool_call(&tc).await;
+        // Extract judgment/reflection if present
+        if let Some(thought) = &tool.agent_thought {
+            pipeline.judgment_preservation.extract_reflection(thought);
+        }
+
+        let result = pipeline.process_tool_call(&tc, agent_id).await;
         let latency_us = t0.elapsed().as_micros() as u64;
 
         // Compute tilt_index: how close this tool is to being blocked
@@ -328,7 +347,14 @@ pub async fn forward_to_upstream(
         Provider::Anthropic => (&proxy_config.anthropic_base_url, "/v1/messages"),
     };
 
-    let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+    let base_clean = base_url.trim_end_matches('/');
+    let base_clean = if base_clean.ends_with("/v1") && path.starts_with("/v1/") {
+        base_clean.strip_suffix("/v1").unwrap()
+    } else {
+        base_clean
+    };
+    
+    let url = format!("{}{}", base_clean, path);
 
     // Force non-streaming — always set stream=false
     let mut upstream_body = body.clone();
@@ -339,18 +365,18 @@ pub async fn forward_to_upstream(
     let client = reqwest::Client::new();
     let mut req = client.post(&url).json(&upstream_body);
 
-    // Forward authorization header if present
-    if let Some(auth) = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-    {
-        req = req.header("authorization", auth);
-    } else if let Some(ref key) = proxy_config.api_key {
+    // Use proxy's API key if available, otherwise forward client's header
+    if let Some(ref key) = proxy_config.api_key {
         let auth_header = match provider {
             Provider::OpenAI => format!("Bearer {}", key),
             Provider::Anthropic => format!("Bearer {}", key),
         };
         req = req.header("authorization", &auth_header);
+    } else if let Some(auth) = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+    {
+        req = req.header("authorization", auth);
     }
 
     // Forward content-type
@@ -390,7 +416,7 @@ pub async fn record_upstream_response(
     // Record tool results in pipeline (compression telemetry)
     for tool in tools {
         if let Some(_result) = &tool.result {
-            let _ = pipeline.process_tool_call(tool).await;
+            let _ = pipeline.process_tool_call(tool, None).await;
         }
     }
 
@@ -525,7 +551,7 @@ mod tests {
         use dedroom_core::DedrooMConfig;
 
         let config = DedrooMConfig::default();
-        let pipeline = Pipeline::new(config);
+        let pipeline = Pipeline::new(config, None);
 
         let blocked = vec![(
             ToolCall {
@@ -562,14 +588,10 @@ mod tests {
 
         let yaml = r#"
             loop_detection:
-              max_repeats: 3
-              adaptive:
-                enabled: true
-                error_reduction: 1
-                min_repeats: 2
+              max_repeats: 2
         "#;
         let config = DedrooMConfig::from_yaml_str(yaml).unwrap();
-        let mut pipeline = Pipeline::new(config);
+        let mut pipeline = Pipeline::new(config, None);
 
         // ── Setup: tempdir-backed event log ─────────────────────────────
 
@@ -586,6 +608,7 @@ mod tests {
                 args: r#"{"path":"/tmp/test.txt"}"#.into(),
                 result: Some("error: permission denied".into()),
                 is_error: true,
+                agent_thought: None,
             })
             .collect();
 
@@ -694,14 +717,10 @@ mod tests {
 
         let yaml = r#"
             loop_detection:
-              max_repeats: 3
-              adaptive:
-                enabled: true
-                error_reduction: 1
-                min_repeats: 2
+              max_repeats: 2
         "#;
         let config = DedrooMConfig::from_yaml_str(yaml).unwrap();
-        let mut pipeline = Pipeline::new(config);
+        let mut pipeline = Pipeline::new(config, None);
 
         let tools: Vec<ExtractedTool> = (0..4)
             .map(|_| ExtractedTool {
@@ -709,6 +728,7 @@ mod tests {
                 args: r#"{"path":"/tmp/secret.txt"}"#.into(),
                 result: Some("access denied".into()),
                 is_error: true,
+                agent_thought: None,
             })
             .collect();
 
