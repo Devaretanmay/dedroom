@@ -25,6 +25,8 @@ pub mod compression;
 pub mod ccr;
 pub mod embedding;
 pub mod telemetry;
+pub mod security;
+pub mod attribution;
 pub mod pipeline;
 
 // Re-export the top-level API

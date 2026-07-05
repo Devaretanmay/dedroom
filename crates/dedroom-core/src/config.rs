@@ -25,6 +25,10 @@ pub struct DedrooMConfig {
     /// Cross-agent memory.
     #[serde(default)]
     pub memory: MemoryConfig,
+
+    /// PII/secret redaction.
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 impl DedrooMConfig {
@@ -48,6 +52,7 @@ impl Default for DedrooMConfig {
             compression: CompressionConfig::default(),
             loop_compression_coupling: LoopCompressionCoupling::default(),
             memory: MemoryConfig::default(),
+            security: SecurityConfig::default(),
         }
     }
 }
@@ -513,4 +518,50 @@ fn default_ccr_ttl() -> u64 {
 
 fn default_memory_backend() -> String {
     "sqlite-vec".into()
+}
+
+// ── Security / PII Redaction ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Master switch for PII/secret redaction.
+    #[serde(default = "default_true")]
+    pub redaction_enabled: bool,
+
+    /// Minimum entropy threshold (bits per byte) for flagging secrets.
+    #[serde(default = "default_entropy_threshold")]
+    pub entropy_threshold: f64,
+
+    /// Whether to enable entropy-based scanning.
+    #[serde(default = "default_true")]
+    pub entropy_detection: bool,
+
+    /// Whether to enable context-aware field detection.
+    #[serde(default = "default_true")]
+    pub context_detection: bool,
+
+    /// Whether to log redacted items to the audit trail.
+    #[serde(default = "default_true")]
+    pub audit_log: bool,
+
+    /// User-defined custom regex patterns.
+    #[serde(default)]
+    pub custom_patterns: Vec<String>,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            redaction_enabled: true,
+            entropy_threshold: 4.5,
+            entropy_detection: true,
+            context_detection: true,
+            audit_log: true,
+            custom_patterns: Vec::new(),
+        }
+    }
+}
+
+fn default_entropy_threshold() -> f64 {
+    4.5
 }

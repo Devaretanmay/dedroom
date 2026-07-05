@@ -143,6 +143,21 @@ pub async fn health(
     }))
 }
 
+/// GET /admin/attribution — token attribution, waste breakdown, and ROI tracking.
+///
+/// Returns a detailed report with per-tool breakdown, waste categorization,
+/// and cost estimates. Shows what happened to every token that passed through
+/// the pipeline.
+pub async fn attribution(
+    Extension(state): Extension<Arc<AppState>>,
+) -> impl IntoResponse {
+    let pipeline = state.default_pipeline.lock().await;
+    let report = pipeline.attribution_report();
+    drop(pipeline);
+
+    Json(json!(report))
+}
+
 /// GET /admin/stats — savings ledger report and pipeline telemetry.
 pub async fn stats(
     Extension(state): Extension<Arc<AppState>>,

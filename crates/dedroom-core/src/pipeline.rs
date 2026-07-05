@@ -15,6 +15,8 @@ use crate::compression::log_compressor::compress_logs;
 use crate::compression::text_compressor::compress_text;
 use crate::ccr::{CcrStore, hash_tool_call};
 use crate::telemetry::{SavingsLedger, CompressionSaving, LoopBlockSaving};
+use crate::security::RedactionEngine;
+use crate::attribution::{AttributionEngine, ToolCallAttribution};
 
 /// A tool call intercepted by the pipeline.
 #[derive(Debug, Clone)]
@@ -50,12 +52,24 @@ pub struct Pipeline {
     pub compression_policy: CompressionPolicy,
     pub ccr_store: CcrStore,
     pub savings_ledger: SavingsLedger,
+    pub redaction_engine: RedactionEngine,
+    pub attribution_engine: AttributionEngine,
 }
 
 impl Pipeline {
     /// Create a new pipeline from configuration with default components.
     pub fn new(config: DedrooMConfig) -> Self {
         let ccr = Self::create_ccr_store(&config);
+        let redaction_config = crate::security::RedactionConfig {
+            enabled: config.security.redaction_enabled,
+            entropy_threshold: config.security.entropy_threshold,
+            entropy_detection: config.security.entropy_detection,
+            context_detection: config.security.context_detection,
+            audit_log: config.security.audit_log,
+            custom_patterns: Vec::new(), // parsed from config.security.custom_patterns
+            redact_strings: Vec::new(),
+            sensitive_fields: None,
+        };
         Self {
             config: config.clone(),
             loop_detector: LoopDetector::new(&config.loop_detection),
@@ -65,6 +79,8 @@ impl Pipeline {
             ),
             ccr_store: ccr,
             savings_ledger: SavingsLedger::new(),
+            redaction_engine: RedactionEngine::new(redaction_config),
+            attribution_engine: AttributionEngine::new(),
         }
     }
 
@@ -137,6 +153,9 @@ impl Pipeline {
         };
         self.compression_policy.set_loop_state(loop_state);
 
+        // Track start time for latency
+        let t0 = std::time::Instant::now();
+
         // 3. If blocked, record and return early
         if verdict.is_blocked() {
             self.loop_detector.record_result(&tool.name, &tool.args, tool.is_error);
@@ -153,6 +172,20 @@ impl Pipeline {
             } else {
                 None
             };
+            // Record attribution for blocked call
+            let blocked_tokens = estimate_tokens(tool.result.as_deref().unwrap_or(""));
+            let latency = t0.elapsed().as_micros() as u64;
+            self.attribution_engine.record(ToolCallAttribution {
+                tool_name: tool.name.clone(),
+                original_tokens: blocked_tokens,
+                compressed_tokens: 0,
+                tokens_saved: blocked_tokens,
+                was_blocked: true,
+                was_error: tool.is_error,
+                was_cached: false,
+                content_type: "blocked".into(),
+                latency_us: latency,
+            });
             return PipelineResult {
                 messages: Vec::new(),
                 loop_verdict: verdict,
@@ -161,30 +194,80 @@ impl Pipeline {
             };
         }
 
-        // 4. Compress the tool result (if present)
+        // 4. Redact sensitive content before compression so secrets are
+        //    never stored in CCR or sent to the LLM.
+        let compress_input = if let Some(result) = tool.result.as_deref().filter(|r| !r.is_empty()) {
+            let (redacted, report) = self.redaction_engine.redact(result);
+            if report.total_redacted > 0 && self.config.security.audit_log {
+                tracing::info!(
+                    "Redacted {} sensitive item(s) from {} tool result",
+                    report.total_redacted,
+                    tool.name,
+                );
+            }
+            redacted
+        } else {
+            String::new()
+        };
+
+        // 5. Compress the tool result (if present) using the redacted content
         let mut compression_results = Vec::new();
-        if let Some(result) = tool.result.as_deref().filter(|r| !r.is_empty()) {
-            let content_type = self.content_router.detect_type(result);
-            let compressed = self.compress_content(result, content_type);
+        let (original_tokens, compressed_tokens) = if !compress_input.is_empty() {
+            let content_type = self.content_router.detect_type(&compress_input);
+            let compressed = self.compress_content(&compress_input, content_type);
             if let Some(cr) = compressed {
-                // Store original in CCR
+                // Store redacted result in CCR (secrets never persist)
                 let key = hash_tool_call(&tool.name, &tool.args);
+                // Clone before moving into CCR so we can still read original_tokens
+                let (orig, compr) = (cr.original_tokens, cr.compressed_tokens);
                 self.ccr_store.put(
                     key,
-                    result.to_string(),
+                    compress_input,
                     tool.is_error,
                 ).await;
 
                 self.savings_ledger.record_compression(&CompressionSaving {
-                    original_tokens: cr.original_tokens,
-                    compressed_tokens: cr.compressed_tokens,
+                    original_tokens: orig,
+                    compressed_tokens: compr,
                     content_type: content_type.name().to_string(),
                 });
                 compression_results.push(cr);
+                (orig, compr)
+            } else {
+                (0u64, 0u64)
             }
-        }
+        } else {
+            (0u64, 0u64)
+        };
 
-        // 5. Record result in loop detector
+        // 6. Record attribution for the processed call
+        let content_type = compression_results
+            .first()
+            .map(|cr| cr.content_type.name().to_string())
+            .unwrap_or_else(|| "none".into());
+        let latency = t0.elapsed().as_micros() as u64;
+        let is_uncompressible = original_tokens == compressed_tokens && original_tokens > 0;
+
+        let tokens_saved = if is_uncompressible {
+            // Still count as saved from redaction perspective but mark waste
+            0
+        } else {
+            original_tokens.saturating_sub(compressed_tokens)
+        };
+
+        self.attribution_engine.record(ToolCallAttribution {
+            tool_name: tool.name.clone(),
+            original_tokens,
+            compressed_tokens,
+            tokens_saved,
+            was_blocked: false,
+            was_error: tool.is_error,
+            was_cached: false,
+            content_type,
+            latency_us: latency,
+        });
+
+        // 6. Record result in loop detector
         self.loop_detector.record_result(&tool.name, &tool.args, tool.is_error);
 
         PipelineResult {
@@ -259,6 +342,11 @@ impl Pipeline {
     /// Get the current compression policy loop state.
     pub fn current_loop_state(&self) -> LoopState {
         self.compression_policy.loop_state()
+    }
+
+    /// Get the attribution report for ROI tracking.
+    pub fn attribution_report(&self) -> crate::attribution::AttributionReport {
+        self.attribution_engine.report()
     }
 }
 

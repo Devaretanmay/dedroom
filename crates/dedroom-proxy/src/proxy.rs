@@ -125,6 +125,7 @@ impl ProxyRouter {
             .route("/admin/events", get(handlers::events))
             .route("/admin/events/stream", get(handlers::events_stream))
             .route("/admin/runtime-env", post(handlers::runtime_env))
+            .route("/admin/attribution", get(handlers::attribution))
             .layer(Extension(self.state.clone()))
     }
 }

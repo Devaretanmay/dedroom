@@ -56,6 +56,11 @@ enum CliCommand {
         port: u16,
         config: PathBuf,
     },
+    /// Launch the TUI dashboard, auto-detecting proxy URL.
+    Dash {
+        port: u16,
+        url: Option<String>,
+    },
 }
 
 fn parse_args() -> Result<CliCommand> {
@@ -68,6 +73,7 @@ fn parse_args() -> Result<CliCommand> {
         eprintln!("  unwrap <agent> Undo wrap changes (restore configs, etc.)");
         eprintln!("  doctor        Run diagnostics (proxy, routing, savings)");
         eprintln!("  proxy         Start standalone proxy server");
+        eprintln!("  dash [url]    Launch TUI dashboard (auto-detect proxy)");
         eprintln!();
         eprintln!("Options:");
         eprintln!("  --port <N>    Proxy port (default: 8080)");
@@ -85,6 +91,11 @@ fn parse_args() -> Result<CliCommand> {
         eprintln!("  dedroom doctor");
         eprintln!("  dedroom doctor --port 9999 --json");
         eprintln!("  dedroom proxy --port 8080");
+        eprintln!();
+        eprintln!("Dash:");
+        eprintln!("  dedroom dash                               # auto-detect on port 8080");
+        eprintln!("  dedroom dash --port 9090                    # custom port");
+        eprintln!("  dedroom dash http://10.0.0.5:9090           # custom URL");
         std::process::exit(1);
     }
 
@@ -209,7 +220,32 @@ fn parse_args() -> Result<CliCommand> {
             }
             Ok(CliCommand::Proxy { port, config })
         }
-        _ => bail!("Unknown command: {command}. Use: wrap | unwrap | proxy"),
+        "dash" => {
+            let mut port = 8080u16;
+            let mut url: Option<String> = None;
+
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--port" => {
+                        i += 1;
+                        if i < args.len() {
+                            port = args[i].parse().context("--port must be a number")?;
+                        }
+                    }
+                    _ => {
+                        if !args[i].starts_with("--") {
+                            url = Some(args[i].clone());
+                        } else {
+                            bail!("Unknown option: {}", args[i]);
+                        }
+                    }
+                }
+                i += 1;
+            }
+
+            Ok(CliCommand::Dash { port, url })
+        }
+        _ => bail!("Unknown command: {command}. Use: wrap | unwrap | proxy | dash"),
     }
 }
 
@@ -264,6 +300,55 @@ fn start_proxy(port: u16, config: &Path) -> Result<std::process::Child> {
         .context(format!(
             "Failed to start proxy at {}",
             proxy_path.display()
+        ))?;
+
+    Ok(child)
+}
+
+/// Find the TUI dashboard binary — sibling to the current executable.
+fn find_tui_binary() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("Cannot determine executable path")?;
+    let exe_dir = exe.parent().context("Cannot find executable directory")?;
+
+    let tui_name = if cfg!(windows) { "dedroom-tui.exe" } else { "dedroom-tui" };
+    let candidate = exe_dir.join(tui_name);
+
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+
+    // Also check just "dedroom-tui" in PATH
+    if let Ok(path) = which::which("dedroom-tui") {
+        return Ok(path);
+    }
+
+    bail!(
+        "Cannot find dedroom-tui binary. Expected at: {}. \
+         Build it first: cargo build -p dedroom-tui",
+        candidate.display()
+    );
+}
+
+/// Launch the TUI dashboard with auto-detected proxy URL.
+fn launch_dash(port: u16, url_override: Option<String>) -> Result<std::process::Child> {
+    let tui_path = find_tui_binary()?;
+
+    let proxy_url = match url_override {
+        Some(url) => url,
+        None => format!("http://localhost:{}", port),
+    };
+
+    eprintln!("  Launching DedrooM dashboard...");
+    eprintln!("  Connecting to proxy at {}", proxy_url);
+
+    let child = Command::new(&tui_path)
+        .arg(&proxy_url)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context(format!(
+            "Failed to launch dashboard at {}",
+            tui_path.display()
         ))?;
 
     Ok(child)
@@ -954,10 +1039,100 @@ async fn wrap_aider(port: u16, config: &Path, agent_args: &[String]) -> Result<(
     ctx.wait_for_agent(&mut agent, "aider").await
 }
 
+// ── Cursor integration ─────────────────────────────────────────────────────
+
+/// Detect Cursor installation.
+fn find_cursor_location() -> Option<PathBuf> {
+    // Check if `cursor` CLI is in PATH (works when user has installed it)
+    if let Ok(path) = which::which("cursor") {
+        return Some(path);
+    }
+
+    // macOS: check standard app bundle
+    #[cfg(target_os = "macos")]
+    {
+        let app_bundle = PathBuf::from("/Applications/Cursor.app");
+        if app_bundle.exists() {
+            return Some(app_bundle);
+        }
+    }
+
+    // Linux: check AppImage or snap
+    #[cfg(target_os = "linux")]
+    {
+        let snaps = [
+            PathBuf::from("/snap/bin/cursor"),
+            PathBuf::from("/usr/local/bin/cursor"),
+        ];
+        for p in &snaps {
+            if p.exists() {
+                return Some(p.clone());
+            }
+        }
+    }
+
+    None
+}
+
+/// Inject proxy settings into Cursor's settings.json.
+fn inject_cursor_settings(port: u16) -> Result<()> {
+    let settings_dir = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
+        .join(".cursor");
+    let settings_file = settings_dir.join("settings.json");
+
+    let mut settings: serde_json::Value = if settings_file.exists() {
+        let content = std::fs::read_to_string(&settings_file)
+            .unwrap_or_else(|_| "{}".to_string());
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    let openai_url = format!("http://127.0.0.1:{}/v1", port);
+    let anthropic_url = format!("http://127.0.0.1:{}", port);
+
+    if let Some(obj) = settings.as_object_mut() {
+        obj.insert(
+            "cursor.general.overrideOpenAIBaseURL".to_string(),
+            serde_json::json!(openai_url),
+        );
+        obj.insert(
+            "cursor.general.overrideAnthropicBaseURL".to_string(),
+            serde_json::json!(anthropic_url),
+        );
+    }
+
+    std::fs::create_dir_all(&settings_dir)?;
+    std::fs::write(&settings_file, serde_json::to_string_pretty(&settings)?)?;
+    eprintln!("  ✅ Proxy settings injected into {}", settings_file.display());
+    Ok(())
+}
+
+/// Launch Cursor app bundle on macOS.
+fn launch_cursor_app() -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Err(anyhow::anyhow!("Automatic launch not supported on this platform"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg("/Applications/Cursor.app")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("Failed to launch Cursor.app — is it installed?")?;
+        eprintln!("  🚀 Launched Cursor.app");
+        Ok(())
+    }
+}
+
 /// Run Cursor through the DedrooM proxy.
 ///
-/// Cursor is a desktop GUI app — we can't launch it as a subprocess.
-/// Print setup instructions and block until Ctrl+C.
+/// Auto-detects Cursor installation, injects proxy settings into
+/// ~/.cursor/settings.json, and launches Cursor if possible.
+/// Falls back to printing setup instructions.
 async fn wrap_cursor(port: u16, config: &Path) -> Result<()> {
     let ctx = WrapContext::new(port, config).await?;
     let openai_url = format!("http://127.0.0.1:{}/v1", port);
@@ -968,19 +1143,38 @@ async fn wrap_cursor(port: u16, config: &Path) -> Result<()> {
     eprintln!("  ║         DEDROOM WRAP: CURSOR                  ║");
     eprintln!("  ╚═════════════════════════════════════════════════╝");
     eprintln!();
-    eprintln!("  DedrooM proxy is running. Configure Cursor:");
-    eprintln!();
-    eprintln!("  For OpenAI models:");
-    eprintln!("    Override Base URL:  {}", openai_url);
-    eprintln!("    API Key:            your-openai-api-key");
-    eprintln!();
-    eprintln!("  For Anthropic models:");
-    eprintln!("    Override Base URL:  {}", anthropic_url);
-    eprintln!("    API Key:            your-anthropic-api-key");
-    eprintln!();
-    eprintln!("  In Cursor Settings:");
-    eprintln!("    Models > OpenAI API Key > Override OpenAI Base URL");
-    eprintln!("    Set to: {}", openai_url);
+
+    if find_cursor_location().is_some() {
+        // Auto-inject settings
+        if let Err(e) = inject_cursor_settings(port) {
+            eprintln!("  ⚠️  Settings injection failed: {e}");
+        }
+
+        // Launch Cursor
+        if let Err(e) = launch_cursor_app() {
+            eprintln!("  ⚠️  Could not launch Cursor: {e}");
+            eprintln!();
+            eprintln!("  To launch Cursor manually and use the proxy:");
+            eprintln!("    OpenAI Override Base URL: {}", openai_url);
+            eprintln!("    Anthropic Override Base URL: {}", anthropic_url);
+        } else {
+            eprintln!();
+            eprintln!("  Cursor settings have been configured.");
+            eprintln!("  Proxy is running. Press Ctrl+C to stop.");
+        }
+    } else {
+        eprintln!("  Cursor not found at standard locations.");
+        eprintln!("  To install the 'cursor' command in PATH:");
+        eprintln!("    1. Open Cursor");
+        eprintln!("    2. Cmd+Shift+P → 'Install cursor command in PATH'");
+        eprintln!();
+        eprintln!("  Manual proxy configuration:");
+        eprintln!("    OpenAI Override Base URL:  {}", openai_url);
+        eprintln!("    Anthropic Override Base URL: {}", anthropic_url);
+        eprintln!();
+        eprintln!("  Cursor Settings > Models > Override OpenAI/Anthropic Base URL");
+    }
+
     eprintln!();
     eprintln!("  Press Ctrl+C to stop the proxy.");
     eprintln!();
@@ -1002,14 +1196,113 @@ async fn wrap_opencode(port: u16, config: &Path, agent_args: &[String]) -> Resul
     result
 }
 
+// ── Cline integration ─────────────────────────────────────────────────────
+
+/// Detect Cline/VS Code installation.
+fn find_cline_location() -> Option<PathBuf> {
+    // Check if `code` CLI is in PATH
+    if let Ok(path) = which::which("code") {
+        return Some(path);
+    }
+
+    // macOS: standard VS Code app bundle
+    #[cfg(target_os = "macos")]
+    {
+        let app_bundle = PathBuf::from("/Applications/Visual Studio Code.app");
+        if app_bundle.exists() {
+            return Some(app_bundle);
+        }
+        // Also check Code - Insiders
+        let insiders = PathBuf::from("/Applications/Visual Studio Code - Insiders.app");
+        if insiders.exists() {
+            return Some(insiders);
+        }
+    }
+
+    None
+}
+
+/// Find the VS Code settings.json path (platform-aware).
+fn vscode_settings_path() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    #[cfg(target_os = "macos")]
+    {
+        Some(home.join("Library/Application Support/Code/User/settings.json"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Some(home.join(".config/Code/User/settings.json"))
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("APPDATA")
+            .ok()
+            .map(|p| PathBuf::from(p).join("Code/User/settings.json"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        None
+    }
+}
+
+/// Inject proxy settings into VS Code's settings.json for Cline.
+///
+/// Cline uses VS Code's settings to configure its API provider.
+/// We inject the proxy base URLs into the user settings.
+fn inject_cline_settings(port: u16) -> Result<()> {
+    let settings_file = vscode_settings_path()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine VS Code settings path"))?;
+
+    // Ensure parent directory exists
+    if let Some(parent) = settings_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut settings: serde_json::Value = if settings_file.exists() {
+        let content = std::fs::read_to_string(&settings_file)
+            .unwrap_or_else(|_| "{}".to_string());
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    let anthropic_url = format!("http://127.0.0.1:{}", port);
+    let openai_url = format!("http://127.0.0.1:{}/v1", port);
+
+    if let Some(obj) = settings.as_object_mut() {
+        // Cline API provider settings (contributed by the extension)
+        obj.insert(
+            "cline.apiProvider".to_string(),
+            serde_json::json!("anthropic"),
+        );
+        obj.insert(
+            "cline.anthropicBaseUrl".to_string(),
+            serde_json::json!(anthropic_url),
+        );
+        obj.insert(
+            "cline.openAiBaseUrl".to_string(),
+            serde_json::json!(openai_url),
+        );
+        obj.insert(
+            "cline.openAiApiKey".to_string(),
+            serde_json::json!("sk-dedroom-proxy"),
+        );
+    }
+
+    std::fs::write(&settings_file, serde_json::to_string_pretty(&settings)?)?;
+    eprintln!("  ✅ Proxy settings injected into {}", settings_file.display());
+    Ok(())
+}
+
 /// Run Cline through the DedrooM proxy.
 ///
-/// Cline is a VS Code extension (GUI app). We inject RTK guidance into
-/// .clinerules, print setup instructions, and block until Ctrl+C.
+/// Injects RTK guidance into .clinerules, auto-detects VS Code/Cline,
+/// injects proxy settings into VS Code settings.json, and launches VS Code.
+/// Falls back to printing setup instructions.
 async fn wrap_cline(port: u16, config: &Path) -> Result<()> {
     let ctx = WrapContext::new(port, config).await?;
 
-    // Inject RTK instructions into .clinerules
+    // Inject RTK instructions into .clinerules (always, even without Cline)
     if let Some(path) = std::env::current_dir().ok().map(|d| d.join(".clinerules")) {
         if path.exists() {
             let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -1031,15 +1324,55 @@ async fn wrap_cline(port: u16, config: &Path) -> Result<()> {
     eprintln!("  ║         DEDROOM WRAP: CLINE                   ║");
     eprintln!("  ╚═════════════════════════════════════════════════╝");
     eprintln!();
-    eprintln!("  DedrooM proxy is running. Configure Cline in VS Code:");
-    eprintln!();
-    eprintln!("  Settings > Cline > API Provider");
-    eprintln!("    Anthropic Base URL:         {}", anthropic_url);
-    eprintln!("    OpenAI Compatible Base URL: {}", openai_url);
-    eprintln!();
-    eprintln!("  Cline will use token-optimized commands automatically.");
-    eprintln!();
-    eprintln!("  Press Ctrl+C to stop the proxy.");
+
+    if find_cline_location().is_some() {
+        // Auto-inject settings into VS Code
+        if let Err(e) = inject_cline_settings(port) {
+            eprintln!("  ⚠️  Settings injection failed: {e}");
+        }
+
+        // Launch VS Code
+        #[cfg(target_os = "macos")]
+        {
+            match Command::new("open")
+                .arg("/Applications/Visual Studio Code.app")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(_) => eprintln!("  🚀 Launched VS Code"),
+                Err(e) => eprintln!("  ⚠️  Could not launch VS Code: {e}"),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Try `code` CLI command
+            if which::which("code").is_ok() {
+                match Command::new("code")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                {
+                    Ok(_) => eprintln!("  🚀 Launched VS Code"),
+                    Err(_) => {}
+                }
+            }
+        }
+
+        eprintln!();
+        eprintln!("  Cline settings have been configured.");
+        eprintln!("  Press Ctrl+C to stop the proxy.");
+    } else {
+        eprintln!("  VS Code not found at standard locations.");
+        eprintln!();
+        eprintln!("  Manual proxy configuration:");
+        eprintln!("    Anthropic Base URL:         {}", anthropic_url);
+        eprintln!("    OpenAI Compatible Base URL: {}", openai_url);
+        eprintln!();
+        eprintln!("  VS Code Settings > Cline > API Provider");
+        eprintln!("  Press Ctrl+C to stop the proxy.");
+    }
+
     eprintln!();
 
     ctx.block_until_ctrlc().await
@@ -1866,6 +2199,15 @@ async fn main() -> Result<()> {
 
             if !status.success() && let Some(code) = status.code() {
                 bail!("Proxy exited with code {}", code);
+            }
+            Ok(())
+        }
+        CliCommand::Dash { port, url } => {
+            // Launch the TUI dashboard
+            let mut child = launch_dash(port, url)?;
+            let status = child.wait()?;
+            if !status.success() && let Some(code) = status.code() {
+                bail!("Dashboard exited with code {}", code);
             }
             Ok(())
         }
