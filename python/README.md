@@ -21,14 +21,6 @@ DedrooM sits between your AI agent and the LLM provider to:
 pip install dedroom
 ```
 
-**Note:** The CLI commands (`wrap`, `proxy`, `doctor`) require the Rust binary.
-Install it from source or use a pre-built release:
-
-```bash
-cargo install dedroom-cli
-# or build from repo: cargo build -p dedroom-cli -p dedroom-proxy
-```
-
 ---
 
 ## Commands

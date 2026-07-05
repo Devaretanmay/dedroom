@@ -16,12 +16,8 @@ DedrooM is a **unified proxy layer** that sits between your AI agent and any LLM
 ### 1. Install
 
 ```bash
-# Python library (always works)
+# Installs both the Python library and the full CLI (wrap, proxy, doctor, dash)
 pip install dedroom
-
-# Rust CLI (required for wrap, proxy, doctor commands)
-cargo install dedroom-cli
-# or build from repo: cargo build -p dedroom-cli -p dedroom-proxy
 ```
 
 ### 2. Wrap your agent
