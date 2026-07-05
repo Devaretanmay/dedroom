@@ -2,7 +2,6 @@
 
 **Loop detection + context compression for AI coding agents — save 60–95% on tokens and never get stuck in a tool loop again.**
 
-[![Crates.io](https://img.shields.io/crates/v/dedroom-core.svg)](https://crates.io/crates/dedroom-core)
 [![PyPI version](https://img.shields.io/pypi/v/dedroom.svg)](https://pypi.org/project/dedroom/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/Devaretanmay/dedroom/blob/main/LICENSE)
 [![MSRV](https://img.shields.io/badge/rustc-1.85%2B-lightgrey)](rust-toolchain.toml)
