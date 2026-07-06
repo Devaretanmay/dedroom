@@ -1,12 +1,35 @@
 # DedrooM
 
-**Loop detection + context compression for AI coding agents — save 60–95% on tokens and never get stuck in a tool loop again.**
+**Cuts your AI coding agent's token bill without changing how you work.**
 
 [![PyPI version](https://img.shields.io/pypi/v/dedroom.svg)](https://pypi.org/project/dedroom/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/Devaretanmay/dedroom/blob/main/LICENSE)
 [![MSRV](https://img.shields.io/badge/rustc-1.85%2B-lightgrey)](rust-toolchain.toml)
 
-DedrooM is a **unified proxy layer** that sits between your AI agent and any LLM provider. It intercepts every tool call to detect loops before they waste tokens, compress productive context, and redact sensitive data — all in real-time with negligible overhead (~1.3ms per call).
+## Why
+
+Two things quietly inflate an agent session's token spend: the agent retrying a failing command in a near-identical loop, and tool output (file listings, logs, diffs) piling into context that the model has effectively already seen. Neither shows up as a single big line item they show up as your bill being higher than the work should have cost.
+
+DedrooM catches both automatically. One command wraps your existing agent (`dedroom wrap claude`), and from then on repeated failing calls get cut off before they compound, and redundant tool output gets compressed before it reaches the model — no changes to how you invoke your agent, no new workflow to learn.
+
+---
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Requirements](#requirements)
+- [Supported Agents](#supported-agents)
+- [Commands](#commands)
+- [Performance](#performance)
+- [Architecture](#architecture)
+- [Python API](#python-api)
+- [Configuration](#configuration)
+- [Backends](#backends)
+- [Security & Privacy](#security--privacy)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
@@ -35,29 +58,37 @@ dedroom wrap opencode \
   -- run -m dedroom/deepseek-v4-flash-free "your task"
 ```
 
-### 3. Press Ctrl+C to stop
+### 3. Stop with Ctrl+C
 
-That's it. The proxy starts, routes all API calls through the pipeline, and stops when you're done.
+That's it the proxy starts, routes all API traffic through the pipeline, and shuts down cleanly when you're done.
+
+---
+
+## Requirements
+
+- Python 3.9+ (for the `pip install dedroom` package and CLI)
+- Rust 1.85+ — only needed if you're building from source (see [Development](#development))
+- macOS, Linux, or Windows (WSL recommended on Windows)
 
 ---
 
 ## Supported Agents
 
 | Agent | Command | How It Works |
-|-------|---------|-------------|
-| **Claude Code** | `dedroom wrap claude` | Sets `ANTHROPIC_BASE_URL` → proxy |
-| **OpenAI Codex** | `dedroom wrap codex` | Injects DedrooM provider into `~/.codex/config.toml` |
-| **Aider** | `dedroom wrap aider` | Sets `OPENAI_API_BASE` + `ANTHROPIC_BASE_URL` |
+|---|---|---|
+| **Claude Code** | `dedroom wrap claude` | Sets `ANTHROPIC_BASE_URL` to the proxy |
+| **OpenAI Codex** | `dedroom wrap codex` | Injects the DedrooM provider into `~/.codex/config.toml` |
+| **Aider** | `dedroom wrap aider` | Sets `OPENAI_API_BASE` and `ANTHROPIC_BASE_URL` |
 | **Cursor** | `dedroom wrap cursor` | Injects proxy URLs into `~/.cursor/settings.json` |
-| **Cline** | `dedroom wrap cline` | Injects RTK instructions into `.clinerules` + VS Code settings |
-| **OpenCode** | `dedroom wrap opencode` | Injects DedrooM provider into `~/.config/opencode/opencode.json` |
+| **Cline** | `dedroom wrap cline` | Injects rules into `.clinerules` and VS Code settings |
+| **OpenCode** | `dedroom wrap opencode` | Injects the DedrooM provider into `~/.config/opencode/opencode.json` |
 
-### Use any LLM provider
+### Bring your own provider
 
-DedrooM is **provider-agnostic**. Point it at any OpenAI-compatible API:
+DedrooM is **provider-agnostic** —> point it at any OpenAI-compatible API:
 
 ```bash
-# OpenCode Zen (free models included)
+# OpenCode Zen (includes free models)
 dedroom wrap opencode \
   --upstream-url https://opencode.ai/zen \
   --api-key "sk-your-key" \
@@ -73,106 +104,90 @@ dedroom wrap aider \
   --upstream-url https://openrouter.ai/api/v1 \
   --api-key "sk-your-key"
 
-# Local Ollama (no API key needed)
+# Local Ollama (no API key required)
 dedroom wrap codex \
   --upstream-url http://localhost:11434/v1
 ```
 
-### Free models (OpenCode Zen)
+### Free models via OpenCode Zen
 
-When wrapping OpenCode with `--upstream-url https://opencode.ai/zen`, DedrooM automatically injects these free models into your OpenCode config:
+When you wrap OpenCode with `--upstream-url https://opencode.ai/zen`, DedrooM automatically registers OpenCode Zen's current free-tier models in your OpenCode config, alongside standard premium models (Claude Opus 4.6, Sonnet 4.6, GPT-4o).
 
-| Model ID | Name | Context |
-|----------|------|:-------:|
-| `deepseek-v4-flash-free` | DeepSeek V4 Flash **Free** | 32K |
-| `mimo-v2.5-free` | MiMo V2.5 **Free** | 32K |
-| `north-mini-code-free` | North Mini Code **Free** | 32K |
-| `nemotron-3-ultra-free` | Nemotron 3 Ultra **Free** | 32K |
-| `big-pickle-free` | Big Pickle **Free** | 32K |
-
-Plus the standard premium models (Claude Opus 4.6, Sonnet 4.6, GPT-4o).
+> The specific free models and their names/limits are set by the OpenCode Zen provider, not DedrooM, and change over time check [opencode.ai/zen](https://opencode.ai/zen) for the current list before depending on a specific one.
 
 ---
 
 ## Commands
 
-### `dedroom wrap <agent>` — Start proxy + launch agent
+### `dedroom wrap <agent>` —> Start the proxy and launch an agent
 
 ```bash
 dedroom wrap claude                   # Default port 8080
 dedroom wrap codex --port 9999        # Custom port
-dedroom wrap aider -- --model sonnet  # Pass args to agent
-dedroom wrap cursor                   # GUI setup (prints instructions)
+dedroom wrap aider -- --model sonnet  # Pass args through to the agent
+dedroom wrap cursor                   # Prints GUI setup instructions
 dedroom wrap cline                    # Injects .clinerules + VS Code settings
 dedroom wrap opencode -- run -m ...   # Non-interactive mode
 ```
 
-### `dedroom unwrap <agent>` — Restore config to pre-wrap state
+### `dedroom unwrap <agent>` —> Restore prior configuration
 
 ```bash
 dedroom unwrap codex     # Restores ~/.codex/config.toml from backup
-dedroom unwrap opencode  # Removes DedrooM provider from opencode.json
-dedroom unwrap claude    # Runtime-only — no persistent state
+dedroom unwrap opencode  # Removes the DedrooM provider from opencode.json
+dedroom unwrap claude    # Runtime-only — nothing persisted to restore
 ```
 
-### `dedroom doctor` — Run diagnostics
+### `dedroom doctor` —> Run diagnostics
 
 ```bash
 dedroom doctor                      # 11 health checks
-dedroom doctor --port 9999          # Check a different port
-dedroom doctor --json               # Machine-readable JSON output
+dedroom doctor --port 9999          # Check a specific port
+dedroom doctor --json               # Machine-readable output
 ```
 
-Checks proxy liveness, agent routing configs, shell environment variables, and token savings.
+Verifies proxy liveness, agent routing configuration, shell environment variables, and token savings.
 
-### `dedroom proxy` — Standalone proxy server
+### `dedroom proxy` Run the proxy standalone
 
 ```bash
 dedroom proxy                         # Port 8080, default config
 dedroom proxy --port 9999             # Custom port
-dedroom proxy --config my-config.yaml # Custom config
+dedroom proxy --config my-config.yaml # Custom config file
 ```
 
-### `dedroom dash` — TUI dashboard
+### `dedroom dash` Terminal dashboard
 
 ```bash
-dedroom dash                          # Auto-detect proxy on port 8080
+dedroom dash                          # Auto-detects proxy on port 8080
 dedroom dash --port 9090              # Custom dashboard port
-dedroom dash http://10.0.0.5:9090     # Remote proxy URL
+dedroom dash http://10.0.0.5:9090     # Point at a remote proxy
 ```
 
 ---
 
-## Enterprise Performance & Benchmarks
+## Performance
 
-DedrooM is designed for production environments where every token translates directly to operational cost and latency. By intercepting traffic at the proxy layer, DedrooM yields substantial infrastructure savings with near-zero overhead.
+> **A note on these numbers:** the figures below come from a small set of internal test scenarios, not a large-scale or third-party benchmark suite. Savings depend heavily on workload — a session with lots of loop-prone retries or large repetitive tool output will see far more benefit than one that doesn't. Treat these as illustrative, reproduce them on your own workload (`cargo bench --features sqlite`) before using them for capacity planning, and don't take the "60–95%" range in the tagline as a guaranteed outcome — the measured scenarios below span roughly 0–64%.
 
-### Token Compression & Payload Reduction
+### Token usage
 
-```mermaid
-xychart-beta
-    title "Agent Session Token Usage (Thousands)"
-    x-axis ["Unoptimized (Native)", "DedrooM Optimized"]
-    y-axis "Tokens (k)" 0 --> 500
-    bar [483, 177]
-```
+| Workload | Native Tokens | DedrooM Tokens | Reduction |
+|---|---:|---:|---|
+| Iterative debugging (10 loops) | 500,000 | 180,000 | `████████████░░░░░░░░` ~64% |
+| Large monorepo scanning | 18,331 | 14,167 | `████░░░░░░░░░░░░░░░░` ~22% |
+| Dense compilation logs | 284 | 284 | `░░░░░░░░░░░░░░░░░░░░` 0% (lossless fallback) |
 
-| Workload Type | Unoptimized Tokens | DedrooM Tokens | Infrastructure Savings |
-|---------------|:------------------:|:--------------:|:-----------------------|
-| **Iterative Debugging (10 loops)** | 500,000 | 180,000 | **~64%** |
-| **Large Monorepo Scanning** | 18,331 | 14,167 | **~22%** |
-| **Dense Compilation Logs** | 284 | 284 | **0%** (Lossless fallback) |
+The compression ratio is workload-dependent by design: DedrooM only compresses what's genuinely redundant, and falls back to passing content through unchanged (the "lossless fallback" case above) when it isn't.
 
-*Assuming enterprise daily usage of 50 concurrent agents on Claude 3.5 Sonnet ($3/M tokens), DedrooM averages **$120/mo in savings per seat**, offsetting its footprint within hours.*
+### Example: payload compression
 
-### Payload Comparison: Native vs. DedrooM
-
-DedrooM transparently strips redundant metadata and truncates excessive arrays before they hit the upstream LLM, preserving the semantic value while drastically cutting the payload size.
+DedrooM strips redundant metadata and truncates long, repetitive arrays before they reach the upstream LLM, preserving meaning while shrinking payload size.
 
 <table width="100%">
 <tr>
-<th width="50%">Native LLM Payload (Bloated)</th>
-<th width="50%">DedrooM Payload (Optimized)</th>
+<th width="50%">Native payload</th>
+<th width="50%">DedrooM payload</th>
 </tr>
 <tr>
 <td>
@@ -200,25 +215,21 @@ DedrooM transparently strips redundant metadata and truncates excessive arrays b
 </tr>
 </table>
 
-### Architecture Latency & Overhead
+### Latency overhead
 
-DedrooM's Rust-based core ensures the interception pipeline is computationally invisible. 
+The interception pipeline is designed to add negligible latency relative to a single LLM round-trip, which typically runs in the low seconds. Median overhead in our microbenchmarks:
 
-```mermaid
-pie title "Latency Profile vs Network Roundtrip (ms)"
-    "LLM Inference Roundtrip (~2000ms)" : 2000
-    "DedrooM Intercept (~1.3ms)" : 1.3
-```
+| Operation | Median | Target SLA |
+|---|:---:|:---|
+| End-to-end intercept | ~1.3 ms | < 2 ms |
+| In-memory pipeline (Rust core) | single-digit µs | < 10 µs |
+| Persistent SQLite logging | ~0.3 ms | < 500 µs |
 
-| Operation | Microbenchmark (Median) | SLA Guarantee |
-|-----------|:-----------------------:|:--------------|
-| **End-to-End Intercept** | **1.315 ms** | `< 2 ms` |
-| **In-Memory Pipeline (Rust Core)** | **5.4 µs** | `< 10 µs` |
-| **Persistent SQLite Logging** | **260 µs** | `< 500 µs` |
+Run `cargo bench --features sqlite` to reproduce these on your own hardware numbers will vary by CPU and payload shape.
 
-### Deterministic Loop Detection
+### Loop detection
 
-DedrooM's loop detector utilizes an adaptive sliding-window algorithm, maintaining 100% precision on halting runaway identical commands while guaranteeing 0% false positives on varied exploratory actions.
+The loop detector uses an adaptive sliding-window algorithm: repeated identical (or near-identical) tool calls get flagged and eventually blocked, while varied, exploratory tool use is left alone. Thresholds tighten automatically as an agent's error rate rises. As with the token-savings numbers above, exact precision/false-positive rates depend on `strictness` and `max_repeats` settings — tune them for your workload rather than relying on defaults for adversarial or unusual tool-call patterns.
 
 ---
 
@@ -226,52 +237,52 @@ DedrooM's loop detector utilizes an adaptive sliding-window algorithm, maintaini
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                   Your Agent                     │
+│                   Your Agent                    │
 │  (Claude Code, Codex, Aider, Cursor, OpenCode)  │
 └─────────────────────┬───────────────────────────┘
                       │ HTTP / SSE
                       ▼
 ┌─────────────────────────────────────────────────┐
-│              DedrooM Proxy (axum)                │
+│              DedrooM Proxy (axum)               │
 │                                                 │
-│  ┌─────────┐  ┌──────────┐  ┌────────────────┐ │
-│  │Redaction│─▶│  Loop    │─▶│  Compression   │ │
-│  │(PII)    │  │Detection │  │  (60-95%)      │ │
-│  └─────────┘  └──────────┘  └────────────────┘ │
-│                      │                          │
+│  ┌─────────┐  ┌──────────┐  ┌────────────────┐  │
+│  │Redaction│─▶│  Loop    │─▶│  Compression   │  │
+│  │(PII)    │  │Detection │  │  (60–95%)      │  │
+│  └─────────┘  └──────────┘  └────────────────┘  │
+│                       │                         │
 │  ┌───────────────────────────────────────────┐  │
 │  │          Savings Ledger + Events          │  │
 │  └───────────────────────────────────────────┘  │
 └─────────────────────┬───────────────────────────┘
-                      │ Forward (OpenAI-compat)
+                      │ Forward (OpenAI-compatible)
                       ▼
 ┌─────────────────────────────────────────────────┐
-│          LLM Provider (your choice)              │
-│  Anthropic │ OpenAI │ DeepSeek │ OpenCode Zen   │
-│  Ollama │ OpenRouter │ or any OpenAI-compat API │
+│              LLM Provider (your choice)         │
+│  Anthropic · OpenAI · DeepSeek · OpenCode Zen   │
+│ Ollama · OpenRouter · any OpenAI-compatible API │
 └─────────────────────────────────────────────────┘
 ```
 
-### Internal Pipeline
+### Internal pipeline
 
 ```
 Receive Request → Extract Tools → Trust Check → Redact PII → Loop Detect → Compress → Judgment & Learning → Forward → Record Telemetry
 ```
 
-- **Trust Verification:** Dynamically drops an agent's `max_repeats` limit to `1` if their trust score tanks from too many failures.
-- **Redaction:** 14 regex patterns + entropy detection for API keys, tokens, secrets
-- **Loop Detection:** Sliding window, adaptive thresholds, error-aware tightening — 460ns median
-- **Compression:** SmartCrusher (JSON), CodeCompressor (AST-aware), LogCompressor (dedup), TextCompressor
-- **Judgment Preservation:** Parses the LLM's raw output for `<thinking>` tags and reflection phrases to track cognitive complexity. Dynamically toggles Quality Score.
-- **Cross-Session Learning:** Saves exact tool failure signatures and dynamically injects "Wisdom from past sessions" as proactive hints right when the agent repeats a known mistake.
-- **Mentor Mode:** Proactively coaches the agent when they start "tilting" and enforces end-of-session reflection.
-- **Telemetry:** NDJSON event log with tilt_index, compression ratios, trust scores, and per-tool savings
+- **Trust verification** — lowers an agent's `max_repeats` limit to `1` when its trust score drops due to repeated failures.
+- **Redaction** — 14 regex patterns plus entropy detection for API keys, tokens, and secrets.
+- **Loop detection** — sliding window with adaptive, error-aware thresholds.
+- **Compression** — SmartCrusher (JSON), CodeCompressor (AST-aware), LogCompressor (dedup), and TextCompressor.
+- **Judgment preservation** — a heuristic that counts `<thinking>` tags and reflection-style phrasing in model output as a rough, best-effort proxy for how much deliberate reasoning is happening in a turn. This is a signal, not a validated quality metric — don't treat the resulting score as ground truth.
+- **Cross-session learning** — stores tool-call failure signatures (tool name + args + error) and injects a short hint into context if the same signature reappears in a later session.
+- **Mentor mode** — when the loop detector's error-rate signal crosses a threshold, injects a prompt nudging the agent to reconsider its approach, and adds a short end-of-session summary prompt.
+- **Telemetry** — NDJSON event log capturing tilt index, compression ratios, trust scores, and per-tool savings.
 
 ---
 
 ## Python API
 
-You can easily integrate DedrooM directly into your own LangChain or custom Python agents! See our [Security Audit Agent Example](examples/security_audit_agent.py) for a complete, production-grade integration.
+Integrate DedrooM directly into a LangChain pipeline or a custom Python agent. See the [Security Audit Agent example](examples/security_audit_agent.py) for a full, production-style integration.
 
 ![DedrooM Security Audit Agent Demo](audit_demo.gif)
 
@@ -339,11 +350,30 @@ redaction:
 ## Backends
 
 | Backend | Use Case | Persistence |
-|---------|----------|:-----------:|
-| **In-memory** | Default, fastest | No |
-| **SQLite** | Persistent, cross-restart | Yes |
+|---|---|:---:|
+| In-memory | Default, fastest | No |
+| SQLite | Persistent, survives restarts | Yes |
 
-SQLite features WAL mode, batch pruning, and adaptive threshold persistence.
+The SQLite backend supports WAL mode, batch pruning, and persisted adaptive thresholds.
+
+---
+
+## Security & Privacy
+
+DedrooM sees every tool call and its arguments before they leave your machine — that includes file contents, command output, and anything else your agent passes through. A few things worth knowing before you route production or client code through it:
+
+- **Redaction runs locally**, before the request is forwarded upstream. It relies on 14 regex patterns plus entropy-based detection for high-entropy strings (likely keys/tokens). It is pattern-based, not a guarantee — review the patterns in your `dedroom.yaml` and add your own for anything specific to your environment.
+- **Telemetry (NDJSON event log) is written locally** by default. Check your `dedroom.yaml` / backend config before assuming nothing is persisted, especially if you enable the SQLite backend.
+- DedrooM forwards traffic to whichever upstream you configure (`--upstream-url`) — it does not send data anywhere else on its own.
+- Treat this like any other proxy in your request path: review the source (it's Apache-2.0 and open) rather than taking redaction coverage on faith, especially for regulated or sensitive codebases.
+
+## Troubleshooting
+
+- **Agent isn't routing through the proxy** — run `dedroom doctor` first; it checks proxy liveness and whether the target agent's config actually points at DedrooM.
+- **Config wasn't restored after `unwrap`** — confirm a backup exists (`unwrap` restores from one); if the original wrap was interrupted mid-way, the backup may be missing and you'll need to reset the agent's config manually.
+- **Port conflicts** — pass `--port` to `wrap`, `proxy`, or `dash` to use a non-default port.
+- **Unexpected compression on structured logs** — set the relevant compressor to `false` in `dedroom.yaml` (`smart_crusher`, `code_compressor`, etc.) if a particular workload needs untouched output.
+- Still stuck? Open an issue with `dedroom doctor --json` output attached.
 
 ---
 
@@ -361,7 +391,7 @@ cd dedroom
 # Build all Rust binaries
 cargo build -p dedroom-cli -p dedroom-proxy -p dedroom-tui
 
-# Build Python wheel
+# Build the Python wheel
 maturin build --release -m crates/dedroom-py/Cargo.toml
 
 # Run tests
@@ -372,23 +402,17 @@ pytest python/tests/
 # Run benchmarks
 cargo bench --features sqlite
 ```
+---
 
-### Project Structure
+## Contributing
 
-```
-dedroom/
-├── crates/
-│   ├── dedroom-core/      # Core engine: loop detection + compression + redaction
-│   ├── dedroom-proxy/     # axum reverse proxy (intercepts + forwards)
-│   ├── dedroom-cli/       # CLI: wrap, unwrap, doctor, proxy, dash
-│   ├── dedroom-py/        # PyO3 Python bindings
-│   ├── dedroom-tui/       # Terminal UI dashboard
-│   └── dedroom-parity/    # Fixture-based parity tests
-├── python/
-│   ├── dedroom/           # Python package source
-│   └── tests/             # Python tests
-└── pyproject.toml         # Python packaging config
-```
+Issues and PRs are welcome. Before opening a PR:
+
+1. Run `cargo test -p dedroom-core -p dedroom-proxy` and `pytest python/tests/` — both should pass.
+2. If you're changing loop-detection or compression behavior, add a fixture-based test under `dedroom-parity` so regressions get caught automatically.
+3. Keep PRs scoped to one change easier to review, easier to bisect if something breaks.
+
+For anything nontrivial, opening an issue first to discuss approach will save you a rewrite.
 
 ---
 
@@ -396,4 +420,4 @@ dedroom/
 
 Apache 2.0 — see [LICENSE](LICENSE).
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project shall be licensed as above, without any additional terms or conditions.
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project shall be licensed as above, with no additional terms or conditions.
