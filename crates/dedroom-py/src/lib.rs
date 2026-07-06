@@ -130,6 +130,14 @@ impl DedrooM {
         compress_by_type(content, ct, retention)
     }
 
+    /// Redact sensitive information using the configured pipeline.
+    ///
+    /// Args:
+    ///     content: The content string to redact.
+    fn redact(&self, content: &str) -> String {
+        self.pipeline.redaction_engine.redact(content).0
+    }
+
     /// Full pipeline: loop detect + compress + record.
     ///
     /// Returns a dict with verdict and compression results.

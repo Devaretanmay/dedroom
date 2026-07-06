@@ -227,23 +227,28 @@ pub async fn process_tools_through_pipeline(
             None
         };
 
-        // Extract compression stats if available
-        let (original_tokens, compressed_tokens, compression_ratio) = result
-            .compression_results
-            .first()
-            .map(|cr| {
-                let ratio = if cr.original_tokens > 0 {
-                    Some(1.0 - cr.compressed_tokens as f64 / cr.original_tokens as f64)
-                } else {
-                    None
-                };
-                (
-                    Some(cr.original_tokens),
-                    Some(cr.compressed_tokens),
-                    ratio,
-                )
-            })
-            .unwrap_or((None, None, None));
+        // Extract compression stats if available, or 100% if blocked
+        let (original_tokens, compressed_tokens, compression_ratio) = if result.loop_verdict.is_blocked() {
+            let orig = dedroom_core::compression::estimate_tokens(tool.result.as_deref().unwrap_or(""));
+            (Some(orig), Some(0), Some(1.0))
+        } else {
+            result
+                .compression_results
+                .first()
+                .map(|cr| {
+                    let ratio = if cr.original_tokens > 0 {
+                        Some(1.0 - cr.compressed_tokens as f64 / cr.original_tokens as f64)
+                    } else {
+                        None
+                    };
+                    (
+                        Some(cr.original_tokens),
+                        Some(cr.compressed_tokens),
+                        ratio,
+                    )
+                })
+                .unwrap_or((None, None, None))
+        };
 
         // Determine verdict string
         let verdict_str = if result.loop_verdict.is_blocked() {

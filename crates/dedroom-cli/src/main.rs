@@ -56,11 +56,6 @@ enum CliCommand {
         port: u16,
         config: PathBuf,
     },
-    /// Launch the TUI dashboard, auto-detecting proxy URL.
-    Dash {
-        port: u16,
-        url: Option<String>,
-    },
 }
 
 fn parse_args() -> Result<CliCommand> {
@@ -73,7 +68,7 @@ fn parse_args() -> Result<CliCommand> {
         eprintln!("  unwrap <agent> Undo wrap changes (restore configs, etc.)");
         eprintln!("  doctor        Run diagnostics (proxy, routing, savings)");
         eprintln!("  proxy         Start standalone proxy server");
-        eprintln!("  dash [url]    Launch TUI dashboard (auto-detect proxy)");
+        eprintln!("  proxy         Start standalone proxy server");
         eprintln!();
         eprintln!("Options:");
         eprintln!("  --port <N>    Proxy port (default: 8080)");
@@ -91,11 +86,6 @@ fn parse_args() -> Result<CliCommand> {
         eprintln!("  dedroom doctor");
         eprintln!("  dedroom doctor --port 9999 --json");
         eprintln!("  dedroom proxy --port 8080");
-        eprintln!();
-        eprintln!("Dash:");
-        eprintln!("  dedroom dash                               # auto-detect on port 8080");
-        eprintln!("  dedroom dash --port 9090                    # custom port");
-        eprintln!("  dedroom dash http://10.0.0.5:9090           # custom URL");
         std::process::exit(1);
     }
 
@@ -220,32 +210,7 @@ fn parse_args() -> Result<CliCommand> {
             }
             Ok(CliCommand::Proxy { port, config })
         }
-        "dash" => {
-            let mut port = 8080u16;
-            let mut url: Option<String> = None;
-
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--port" => {
-                        i += 1;
-                        if i < args.len() {
-                            port = args[i].parse().context("--port must be a number")?;
-                        }
-                    }
-                    _ => {
-                        if !args[i].starts_with("--") {
-                            url = Some(args[i].clone());
-                        } else {
-                            bail!("Unknown option: {}", args[i]);
-                        }
-                    }
-                }
-                i += 1;
-            }
-
-            Ok(CliCommand::Dash { port, url })
-        }
-        _ => bail!("Unknown command: {command}. Use: wrap | unwrap | proxy | dash"),
+        _ => bail!("Unknown command: {command}. Use: wrap | unwrap | proxy"),
     }
 }
 
@@ -305,54 +270,6 @@ fn start_proxy(port: u16, config: &Path) -> Result<std::process::Child> {
     Ok(child)
 }
 
-/// Find the TUI dashboard binary — sibling to the current executable.
-fn find_tui_binary() -> Result<PathBuf> {
-    let exe = std::env::current_exe().context("Cannot determine executable path")?;
-    let exe_dir = exe.parent().context("Cannot find executable directory")?;
-
-    let tui_name = if cfg!(windows) { "dedroom-tui.exe" } else { "dedroom-tui" };
-    let candidate = exe_dir.join(tui_name);
-
-    if candidate.exists() {
-        return Ok(candidate);
-    }
-
-    // Also check just "dedroom-tui" in PATH
-    if let Ok(path) = which::which("dedroom-tui") {
-        return Ok(path);
-    }
-
-    bail!(
-        "Cannot find dedroom-tui binary. Expected at: {}. \
-         Build it first: cargo build -p dedroom-tui",
-        candidate.display()
-    );
-}
-
-/// Launch the TUI dashboard with auto-detected proxy URL.
-fn launch_dash(port: u16, url_override: Option<String>) -> Result<std::process::Child> {
-    let tui_path = find_tui_binary()?;
-
-    let proxy_url = match url_override {
-        Some(url) => url,
-        None => format!("http://localhost:{}", port),
-    };
-
-    eprintln!("  Launching DedrooM dashboard...");
-    eprintln!("  Connecting to proxy at {}", proxy_url);
-
-    let child = Command::new(&tui_path)
-        .arg(&proxy_url)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context(format!(
-            "Failed to launch dashboard at {}",
-            tui_path.display()
-        ))?;
-
-    Ok(child)
-}
 
 /// Poll the proxy /health endpoint until it responds.
 async fn wait_for_proxy(port: u16, timeout_secs: u64) -> Result<()> {
@@ -2202,14 +2119,6 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        CliCommand::Dash { port, url } => {
-            // Launch the TUI dashboard
-            let mut child = launch_dash(port, url)?;
-            let status = child.wait()?;
-            if !status.success() && let Some(code) = status.code() {
-                bail!("Dashboard exited with code {}", code);
-            }
-            Ok(())
-        }
+
     }
 }
