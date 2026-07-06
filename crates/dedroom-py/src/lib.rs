@@ -14,7 +14,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use dedroom_core::compression::{CompressionPolicy, ContentRouter, ContentType};
+use dedroom_core::compression::{ContentRouter, ContentType};
+use dedroom_core::compression::policy::{determine_level, retention_for_level};
 use dedroom_core::compression::{
     compress_code as core_compress_code,
     compress_logs as core_compress_logs,
@@ -24,9 +25,6 @@ use dedroom_core::compression::{
 use dedroom_core::config::DedrooMConfig;
 use dedroom_core::loop_detection::{LoopDetector, LoopVerdict};
 use dedroom_core::pipeline::{Pipeline, ToolCall};
-use dedroom_core::intelligence::store::{IntelligenceStore, InMemoryIntelligenceStore};
-use std::sync::Arc;
-
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /// Convert LoopVerdict to a Python-friendly code.
@@ -57,10 +55,6 @@ fn parse_content_type(s: &str) -> ContentType {
         "code" => ContentType::Code,
         "log" | "logs" => ContentType::Log,
         "text" | "txt" => ContentType::Text,
-        "diff" => ContentType::Diff,
-        "search_results" => ContentType::SearchResults,
-        "tabular" => ContentType::Tabular,
-        "html" => ContentType::Html,
         _ => ContentType::Text,
     }
 }
@@ -87,8 +81,7 @@ impl DedrooM {
         let config = DedrooMConfig::from_yaml_str(config_yaml)
             .map_err(|e| PyValueError::new_err(format!("Invalid configuration YAML: {e}")))?;
 
-        let store: Arc<dyn IntelligenceStore> = Arc::new(InMemoryIntelligenceStore::new());
-        let pipeline = Pipeline::new(config, Some(store));
+        let pipeline = Pipeline::new(config);
 
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create async runtime: {e}")))?;
@@ -120,13 +113,13 @@ impl DedrooM {
     ///                   If empty, auto-detect.
     fn compress(&self, content: &str, content_type: &str) -> String {
         let router = &self.pipeline.content_router;
-        let policy = &self.pipeline.compression_policy;
         let ct = if content_type.is_empty() {
             router.detect_type(content)
         } else {
             parse_content_type(content_type)
         };
-        let retention = policy.smart_crusher_retention();
+        let level = determine_level(self.pipeline.loop_state, &self.pipeline.config.loop_compression_coupling);
+        let retention = retention_for_level(level);
         compress_by_type(content, ct, retention)
     }
 
@@ -168,10 +161,6 @@ impl DedrooM {
             },
             is_error,
         };
-
-        if let Some(thought) = agent_thought {
-            self.pipeline.judgment_preservation.extract_reflection(&thought);
-        }
 
         let pipeline_result = self
             .runtime
@@ -226,7 +215,6 @@ impl DedrooM {
         dict.set_item("total_calls_blocked", report.total_calls_blocked).ok();
         dict.set_item("total_original_tokens", report.total_original_tokens).ok();
         dict.set_item("total_compressed_tokens", report.total_compressed_tokens).ok();
-        dict.set_item("loop_block_by_tool", report.loop_block_by_tool).ok();
         dict.into_any()
     }
 
@@ -274,9 +262,9 @@ fn compress_text_oneshot(content: &str, config_yaml: &str) -> PyResult<String> {
     let config = DedrooMConfig::from_yaml_str(config_yaml)
         .map_err(|e| PyValueError::new_err(format!("Invalid configuration YAML: {e}")))?;
     let router = ContentRouter::new(&config.compression.content_router);
-    let policy = CompressionPolicy::new(&config.loop_compression_coupling);
+    let level = determine_level(dedroom_core::compression::policy::LoopState::None, &config.loop_compression_coupling);
+    let retention = retention_for_level(level);
     let content_type = router.detect_type(content);
-    let retention = policy.smart_crusher_retention();
     Ok(compress_by_type(content, content_type, retention))
 }
 

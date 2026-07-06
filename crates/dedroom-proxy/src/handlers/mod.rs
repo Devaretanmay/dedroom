@@ -31,16 +31,6 @@ pub async fn chat_completions(
     let pipeline = state.get_or_create_pipeline(session_id.as_deref()).await;
     let mut pipeline_guard = pipeline.lock().await;
 
-    // Check trust score and dynamically throttle if untrusted
-    let mut original_max_repeats = None;
-    if let Some(id) = agent_id.as_deref() {
-        if !pipeline_guard.trust_verification.is_trusted(id).await {
-            // Agent has a low trust score! Throttle to a max of 1 repeat.
-            original_max_repeats = Some(pipeline_guard.config.loop_detection.max_repeats);
-            pipeline_guard.config.loop_detection.max_repeats = 1;
-            pipeline_guard.loop_detector.config.max_repeats = 1;
-        }
-    }
     let (_allowed, blocked) = intercept::process_tools_through_pipeline(
         &mut pipeline_guard,
         tools,
@@ -50,12 +40,6 @@ pub async fn chat_completions(
         shadow_mode,
     )
     .await;
-    // Restore max_repeats if throttled
-    if let Some(orig) = original_max_repeats {
-        pipeline_guard.config.loop_detection.max_repeats = orig;
-        pipeline_guard.loop_detector.config.max_repeats = orig;
-    }
-    
     drop(pipeline_guard);
 
     if !shadow_mode && let Some(blocked_resp) = blocked {
@@ -239,7 +223,7 @@ pub async fn stats(
     let pipeline = state.default_pipeline.lock().await;
     let report = pipeline.savings_report();
     let summary = pipeline.loop_state_summary();
-    let global_trust_stats = pipeline.trust_verification.store.get_global_stats().await.unwrap_or(json!({}));
+    let att = pipeline.attribution_report();
     drop(pipeline);
 
     let cfg = state.config.read().await.clone();
@@ -252,18 +236,11 @@ pub async fn stats(
             "total_calls_blocked": report.total_calls_blocked,
             "total_original_tokens": report.total_original_tokens,
             "total_compressed_tokens": report.total_compressed_tokens,
-            "blocked_by_tool": report
-                .loop_block_by_tool
-                .iter()
-                .map(|(name, count)| json!({ "tool": name, "count": count }))
-                .collect::<Vec<_>>(),
+            "blocked_by_tool": att.per_tool,
         },
         "loop_state": {
             "total_calls": summary.total_calls,
             "tool_counts": summary.tool_counts,
-        },
-        "intelligence": {
-            "trust_verification": global_trust_stats,
         },
         "config": {
             "max_repeats": cfg.loop_detection.max_repeats,
@@ -272,28 +249,33 @@ pub async fn stats(
     }))
 }
 
-/// GET /admin/events — return recent events from the in-memory ring buffer.
+/// GET /admin/events — return recent events from the NDJSON file.
 ///
-/// Returns the last 100 events as a JSON array, plus metadata.
-/// Zero I/O — reads from the EventLog's ring buffer populated during `record()`.
+/// Reads the last 100 lines from the event log file. Falls back to
+/// empty if the file is not yet written or unavailable.
 pub async fn events(
     Extension(state): Extension<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let max_events = 100usize;
-    let recent = state.event_log.recent_events(max_events);
     let total_events = state.event_log.event_count();
-
-    let events: Vec<Value> = recent
-        .iter()
-        .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
-        .collect();
+    let path = state.event_log.path().to_path_buf();
+    let events_path = path.clone();
+    let events: Vec<Value> = tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&events_path).ok()?;
+        let reader = std::io::BufReader::new(file);
+        let lines: Vec<String> = std::io::BufRead::lines(reader)
+            .map_while(Result::ok)
+            .collect();
+        let tail: Vec<Value> = lines.iter().rev().take(100)
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        Some(tail)
+    }).await.unwrap_or(None).unwrap_or_default();
 
     Json(json!({
         "events": events,
         "total_events": total_events,
         "returned": events.len(),
-        "ring_capacity": 1000,
-        "file_path": state.event_log.path().to_string_lossy(),
+        "file_path": path.to_string_lossy(),
     }))
     .into_response()
 }

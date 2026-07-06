@@ -1,11 +1,11 @@
 /// Quick compression quality check for CodeCompressor with tree-sitter.
 /// Run: cargo run --example compression_quality
-use dedroom_core::compression::{compress_code, estimate_tokens};
+use dedroom_core::compression::compress_code;
 
 fn check(label: &str, language: &str, code: &str) {
-    let original_tokens = estimate_tokens(code);
+    let original_tokens = (code.len() as f64 / 4.0).ceil() as u64;
     let compressed = compress_code(code, language);
-    let compressed_tokens = estimate_tokens(&compressed);
+    let compressed_tokens = (compressed.len() as f64 / 4.0).ceil() as u64;
     let reduction_pct = if original_tokens > 0 {
         ((original_tokens - compressed_tokens) as f64 / original_tokens as f64) * 100.0
     } else {

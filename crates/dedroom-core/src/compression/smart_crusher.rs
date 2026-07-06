@@ -7,18 +7,22 @@
 use serde_json::Value;
 use std::collections::HashSet;
 
+/// Maximum rows to feed into the O(n²) greedy selection.
+/// Beyond this, only the first `MAX_ROWS` are considered.
+const MAX_ROWS: usize = 200;
+
 /// Compress a JSON array string, returning the compressed result.
 pub fn compress_json_array(
     input: &str,
     retention: f64,
-) -> Result<CompressedJson, CompressionError> {
+) -> Result<CompressedJson, String> {
     let value: Value = serde_json::from_str(input)
-        .map_err(|e| CompressionError::ParseError(e.to_string()))?;
+        .map_err(|e| format!("parse error: {e}"))?;
 
     let array = match value {
         Value::Array(arr) => arr,
         Value::Object(_) => return compress_single_object(input),
-        _ => return Err(CompressionError::UnsupportedType),
+        _ => return Err("unsupported type for smart crusher".into()),
     };
 
     if array.is_empty() || array.len() <= 2 {
@@ -30,26 +34,55 @@ pub fn compress_json_array(
         });
     }
 
-    let num_to_keep = (array.len() as f64 * retention).max(1.0).ceil() as usize;
-    let num_to_keep = num_to_keep.min(array.len());
+    compress_slice(&array, retention, array.len())
+}
 
-    // Greedy row selection based on bigram diversity
-    let selected = greedy_select_rows(&array, num_to_keep);
+/// Compress a pre-parsed slice of JSON values (avoids double-parse
+/// when the caller already parsed via content routing).
+///
+/// Caps the working set at [`MAX_ROWS`] rows to keep the O(n²)
+/// greedy selection bounded.
+pub(crate) fn compress_slice(
+    rows: &[Value],
+    retention: f64,
+    original_count: usize,
+) -> Result<CompressedJson, String> {
+    if rows.is_empty() || rows.len() <= 2 {
+        let content = serde_json::to_string(rows).unwrap_or_default();
+        return Ok(CompressedJson {
+            content,
+            original_count,
+            compressed_count: rows.len(),
+            rows_dropped: original_count - rows.len(),
+        });
+    }
 
-    let compressed_rows: Vec<Value> = selected.iter().map(|&idx| array[idx].clone()).collect();
+    // Cap working set to bound greedy selection cost
+    let working_set = if rows.len() > MAX_ROWS {
+        &rows[..MAX_ROWS]
+    } else {
+        rows
+    };
+
+    let num_to_keep = (working_set.len() as f64 * retention).max(1.0).ceil() as usize;
+    let num_to_keep = num_to_keep.min(working_set.len());
+
+    let selected = greedy_select_rows(working_set, num_to_keep);
+
+    let compressed_rows: Vec<Value> = selected.iter().map(|&idx| working_set[idx].clone()).collect();
     let compressed_content = serde_json::to_string(&compressed_rows)
-        .map_err(|e| CompressionError::SerializeError(e.to_string()))?;
+        .map_err(|e| format!("serialize error: {e}"))?;
 
     Ok(CompressedJson {
         content: compressed_content,
-        original_count: array.len(),
+        original_count,
         compressed_count: compressed_rows.len(),
-        rows_dropped: array.len() - compressed_rows.len(),
+        rows_dropped: original_count - compressed_rows.len(),
     })
 }
 
 /// Compress a single JSON object (wraps in array if needed).
-fn compress_single_object(input: &str) -> Result<CompressedJson, CompressionError> {
+fn compress_single_object(input: &str) -> Result<CompressedJson, String> {
     Ok(CompressedJson {
         content: input.to_string(),
         original_count: 1,
@@ -138,21 +171,7 @@ pub struct CompressedJson {
     pub rows_dropped: usize,
 }
 
-/// Compression errors.
-#[derive(Debug, thiserror::Error)]
-pub enum CompressionError {
-    #[error("failed to parse input: {0}")]
-    ParseError(String),
-    #[error("serialization failed: {0}")]
-    SerializeError(String),
-    #[error("unsupported content type for this compressor")]
-    UnsupportedType,
-}
 
-/// Estimate token count for a string (rough: 4 chars ≈ 1 token).
-pub fn estimate_tokens(text: &str) -> u64 {
-    (text.len() as f64 / 4.0).ceil() as u64
-}
 
 #[cfg(test)]
 mod tests {
@@ -194,12 +213,6 @@ mod tests {
         let result = compress_json_array(input, 0.5).unwrap();
         assert_eq!(result.original_count, 2);
         assert_eq!(result.compressed_count, 2); // retention=0.5 → ceil(2*0.5)=1 max 2
-    }
-
-    #[test]
-    fn test_estimate_tokens() {
-        assert_eq!(estimate_tokens("hello world"), 3); // 11 chars / 4 ≈ 2.75 → 3
-        assert!(estimate_tokens("") == 0);
     }
 
     #[test]

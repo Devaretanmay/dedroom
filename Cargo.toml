@@ -5,8 +5,7 @@ members = [
     "crates/dedroom-proxy",
     "crates/dedroom-cli",
     "crates/dedroom-py",
-    "crates/dedroom-parity",
-    "crates/dedroom-benchmark",
+
 ]
 default-members = ["crates/dedroom-core", "crates/dedroom-proxy", "crates/dedroom-cli"]
 
@@ -46,7 +45,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # Error handling
-thiserror = "2"
 anyhow = "1"
 
 # Random / UUID

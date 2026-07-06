@@ -8,47 +8,33 @@ use std::collections::HashMap;
 use serde_json::Value;
 use crate::config::{
     LoopDetectionConfig, Strictness, CountMode, ToolOverride,
-    RuleConfig, RuleKind, RuleAction, ErrorDetectionConfig,
+    RuleConfig, RuleKind, RuleAction,
 };
 
 use super::history::HistoryBackend;
 use super::history::HistoryTracker;
-use super::canonical::{strip_volatile_fields, VolatileInferenceEngine};
+use super::canonical::strip_volatile_fields;
 use super::adaptive::AdaptiveThreshold;
 
-// ── Public types ───────────────────────────────────────────────────────────
-
-/// The verdict after running loop detection on a tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LoopVerdict {
-    /// Call is allowed — not a loop.
     Allow,
-    /// Call is suspicious but allowed (lenient mode). Tag the response.
     Warn,
-    /// Call is blocked — agent should retry with a different approach.
     BlockRetry,
-    /// Call is blocked — agent should give up on this approach.
     BlockHalt,
 }
 
 impl LoopVerdict {
-    /// Returns `true` if the call should be blocked.
     pub fn is_blocked(self) -> bool {
         matches!(self, Self::BlockRetry | Self::BlockHalt)
     }
-
-    /// Convert to an integer code (0–3).
     pub fn to_code(self) -> u8 {
         match self {
-            Self::Allow => 0,
-            Self::Warn => 1,
-            Self::BlockRetry => 2,
-            Self::BlockHalt => 3,
+            Self::Allow => 0, Self::Warn => 1, Self::BlockRetry => 2, Self::BlockHalt => 3,
         }
     }
 }
 
-/// A compiled rule for argument validation.
 #[derive(Debug, Clone)]
 pub struct CompiledRule {
     pub tool_pattern: String,
@@ -60,101 +46,56 @@ pub struct CompiledRule {
 pub enum CompiledRuleKind {
     Regex(regex::Regex),
     Exact(String),
-    JsonSchema { required: Vec<String>, type_name: String },
+    RequiredFields(Vec<String>),
 }
 
-// ── Rule engine ────────────────────────────────────────────────────────────
-
-/// Validates tool arguments against configured rules.
 #[derive(Debug, Default)]
 pub struct RuleEngine {
     rules: Vec<CompiledRule>,
 }
 
 impl RuleEngine {
-    /// Build from configuration.
     pub fn from_config(configs: &[RuleConfig]) -> Self {
         let mut rules = Vec::new();
         for rc in configs {
             let kind = match &rc.kind {
-                RuleKind::Regex { pattern } => {
-                    match regex::Regex::new(pattern) {
-                        Ok(re) => CompiledRuleKind::Regex(re),
-                        Err(e) => {
-                            tracing::warn!("invalid regex rule '{}': {}", pattern, e);
-                            continue;
-                        }
-                    }
-                }
-                RuleKind::Exact { value } => {
-                    CompiledRuleKind::Exact(value.clone())
-                }
-                RuleKind::JsonSchema { required, type_name } => {
-                    CompiledRuleKind::JsonSchema {
-                        required: required.clone(),
-                        type_name: type_name.clone(),
-                    }
-                }
+                RuleKind::Regex { pattern } => match regex::Regex::new(pattern) {
+                    Ok(re) => CompiledRuleKind::Regex(re),
+                    Err(e) => { tracing::warn!("invalid regex rule '{}': {}", pattern, e); continue; }
+                },
+                RuleKind::Exact { value } => CompiledRuleKind::Exact(value.clone()),
+                RuleKind::RequiredFields { fields } => CompiledRuleKind::RequiredFields(fields.clone()),
             };
-            rules.push(CompiledRule {
-                tool_pattern: rc.tool.clone(),
-                kind,
-                action: rc.on_match,
-            });
+            rules.push(CompiledRule { tool_pattern: rc.tool.clone(), kind, action: rc.on_match });
         }
         Self { rules }
     }
 
-    /// Validate a tool call against all matching rules.
-    /// Returns `None` if all rules pass, or the action of the first blocking rule.
     pub fn validate(&self, tool: &str, args_json: &str) -> Option<RuleAction> {
         let args: Value = serde_json::from_str(args_json).ok()?;
         for rule in &self.rules {
-            if !tool_matches_pattern(tool, &rule.tool_pattern) {
-                continue;
-            }
+            if !tool_matches_pattern(tool, &rule.tool_pattern) { continue; }
             let triggers = match &rule.kind {
-                CompiledRuleKind::Regex(re) => {
-                    let flat = serde_json::to_string(&args).unwrap_or_default();
-                    re.is_match(&flat)
-                }
-                CompiledRuleKind::Exact(value) => {
-                    let flat = serde_json::to_string(&args).unwrap_or_default();
-                    flat == *value
-                }
-                CompiledRuleKind::JsonSchema { required, .. } => {
-                    required.iter().any(|field| args.get(field).is_none())
-                }
+                CompiledRuleKind::Regex(re) => { let flat = serde_json::to_string(&args).unwrap_or_default(); re.is_match(&flat) }
+                CompiledRuleKind::Exact(value) => { let flat = serde_json::to_string(&args).unwrap_or_default(); flat == *value }
+                CompiledRuleKind::RequiredFields(fields) => fields.iter().any(|field| args.get(field).is_none()),
             };
-            if triggers {
-                return Some(rule.action);
-            }
+            if triggers { return Some(rule.action); }
         }
         None
     }
 }
 
 fn tool_matches_pattern(tool: &str, pattern: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-    // Simple glob: support wildcard suffix
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        tool.starts_with(prefix)
-    } else {
-        tool == pattern
-    }
+    if pattern == "*" { return true; }
+    if let Some(prefix) = pattern.strip_suffix('*') { tool.starts_with(prefix) } else { tool == pattern }
 }
-
-// ── Per-tool config lookup ─────────────────────────────────────────────────
 
 #[derive(Debug)]
 struct ToolConfig {
     max_repeats: Option<u32>,
     count_mode: Option<CountMode>,
     volatile_fields: Vec<String>,
-    #[allow(dead_code)]
-    error_detection: Option<ErrorDetectionConfig>,
 }
 
 impl ToolConfig {
@@ -162,135 +103,58 @@ impl ToolConfig {
         let mut map = HashMap::new();
         for o in overrides {
             map.insert(o.name.clone(), Self {
-                max_repeats: o.max_repeats,
-                count_mode: o.count_mode,
+                max_repeats: o.max_repeats, count_mode: o.count_mode,
                 volatile_fields: o.volatile_fields.clone(),
-                error_detection: o.error_detection.clone(),
             });
         }
         map
     }
 }
 
-// ── LoopDetector ───────────────────────────────────────────────────────────
-
-/// The main loop detection engine.
-///
-/// Thread-safe: uses internal synchronization. Clone to create per-session
-/// instances from shared config.
 #[derive(Debug)]
 pub struct LoopDetector {
     pub config: LoopDetectionConfig,
     history: Box<dyn HistoryBackend>,
     rule_engine: RuleEngine,
     adaptive: AdaptiveThreshold,
-    volatile_inference: VolatileInferenceEngine,
     tool_configs: HashMap<String, ToolConfig>,
-    /// Whether persisted adaptive threshold state has been loaded.
-    adaptive_state_loaded: bool,
-    /// Counter for batching adaptive state persistence (save every N changes).
-    adaptive_save_counter: u64,
 }
 
 impl LoopDetector {
-    /// Create a new detector from configuration with the default in-memory
-    /// history backend (or SQLite if configured and the `sqlite` feature is
-    /// enabled).
     pub fn new(config: &LoopDetectionConfig) -> Self {
-        let effective_window = config.history_window
-            .unwrap_or(config.max_repeats * 2) as usize;
-
+        let effective_window = config.history_window.unwrap_or(config.max_repeats * 2) as usize;
         let history: Box<dyn HistoryBackend> = Self::create_history_backend(config, effective_window);
-
         Self {
             config: config.clone(),
             history,
             rule_engine: RuleEngine::from_config(&config.rules),
-            adaptive: AdaptiveThreshold::new(
-                config.adaptive.enabled,
-                config.max_repeats,
-                config.adaptive.error_reduction,
-                config.adaptive.min_repeats,
-            ),
-            volatile_inference: VolatileInferenceEngine::new(
-                config.volatile_fields.auto_inference,
-                config.volatile_fields.min_occurrences as usize,
-            ),
+            adaptive: AdaptiveThreshold::new(config.adaptive.enabled, config.max_repeats, config.adaptive.error_reduction, config.adaptive.min_repeats),
             tool_configs: ToolConfig::from_overrides(&config.tools),
-            adaptive_state_loaded: false,
-            adaptive_save_counter: 1,
         }
     }
 
-    /// Create a detector with an explicit history backend.
     pub fn with_backend(config: &LoopDetectionConfig, history: Box<dyn HistoryBackend>) -> Self {
         Self {
-            config: config.clone(),
-            history,
+            config: config.clone(), history,
             rule_engine: RuleEngine::from_config(&config.rules),
-            adaptive: AdaptiveThreshold::new(
-                config.adaptive.enabled,
-                config.max_repeats,
-                config.adaptive.error_reduction,
-                config.adaptive.min_repeats,
-            ),
-            volatile_inference: VolatileInferenceEngine::new(
-                config.volatile_fields.auto_inference,
-                config.volatile_fields.min_occurrences as usize,
-            ),
+            adaptive: AdaptiveThreshold::new(config.adaptive.enabled, config.max_repeats, config.adaptive.error_reduction, config.adaptive.min_repeats),
             tool_configs: ToolConfig::from_overrides(&config.tools),
-            adaptive_state_loaded: false,
-            adaptive_save_counter: 1,
         }
     }
 
-    /// Ensure persisted adaptive threshold state is loaded from the backend.
-    /// Called lazily on first use to avoid SQL query overhead at construction time.
-    fn ensure_adaptive_state_loaded(&mut self) {
-        if self.adaptive_state_loaded {
-            return;
-        }
-        let saved = self.history.load_adaptive_state();
-        if !saved.is_empty() {
-            self.adaptive.import_state(&saved);
-            tracing::info!(
-                "Restored adaptive threshold for {} tool(s) from persistent storage",
-                saved.len(),
-            );
-        }
-        self.adaptive_state_loaded = true;
-    }
-
-    /// Create the appropriate history backend based on configuration.
-    #[allow(unused_variables)]
-    fn create_history_backend(config: &LoopDetectionConfig, window: usize) -> Box<dyn HistoryBackend> {
+    fn create_history_backend(_config: &LoopDetectionConfig, window: usize) -> Box<dyn HistoryBackend> {
         #[cfg(feature = "sqlite")]
-        if config.history_backend == "sqlite" {
-            let path = config.history_path.as_deref().unwrap_or(":memory:");
+        if _config.history_backend == "sqlite" {
+            let path = _config.history_path.as_deref().unwrap_or(":memory:");
             match crate::loop_detection::SqliteHistoryTracker::new(path, window) {
-                Ok(sqlite) => {
-                    tracing::info!("Loop detection history using SQLite backend: {path}");
-                    return Box::new(sqlite);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to open SQLite loop history at {path}: {e}. 
-                         Falling back to in-memory."
-                    );
-                }
+                Ok(sqlite) => { tracing::info!("Loop detection history using SQLite backend: {path}"); return Box::new(sqlite); }
+                Err(e) => { tracing::warn!("Failed to open SQLite loop history at {path}: {e}. Falling back to in-memory."); }
             }
         }
-
         Box::new(HistoryTracker::new(window))
     }
 
-    /// Verify a tool call. Returns the loop verdict.
-    ///
-    /// * `tool` — the tool name (e.g. `write_file`, `search`)
-    /// * `args_json` — JSON string of tool arguments
     pub fn verify(&mut self, tool: &str, args_json: &str) -> LoopVerdict {
-        // Lazy-load persisted adaptive state on first use
-        self.ensure_adaptive_state_loaded();
 
         if !self.config.enabled {
             return LoopVerdict::Allow;
@@ -320,8 +184,6 @@ impl LoopDetector {
             .unwrap_or_default();
 
         let canonical_args = strip_volatile_fields(args_json, &configured_volatiles);
-        let canonical_args = self.volatile_inference
-            .process(tool, &canonical_args);
 
         // 5. Count repeats in history
         let effective_max = tcfg
@@ -366,22 +228,14 @@ impl LoopDetector {
             .map(|t| t.volatile_fields.iter().map(|s| s.as_str()).collect())
             .unwrap_or_default();
         let canonical_args = strip_volatile_fields(args_json, &configured_volatiles);
-        let canonical_args = self.volatile_inference.process(tool, &canonical_args);
-
-        // Lazy-load persisted adaptive state on first use
-        self.ensure_adaptive_state_loaded();
 
         self.history.push(tool.to_string(), canonical_args, was_error);
 
-        // Feed back to adaptive threshold
         if was_error {
             self.adaptive.record_error(tool);
         } else {
             self.adaptive.record_success(tool);
         }
-
-        // Periodically flush all adaptive state to the backend (batched)
-        self.maybe_flush_adaptive_state();
     }
 
     /// Current loop state summary.
@@ -415,20 +269,6 @@ impl LoopDetector {
 
         let total_errors = history.iter().filter(|e| e.was_error).count();
         total_errors as f64 / history.len() as f64
-    }
-
-    /// Periodically flush all adaptive threshold state to the backend.
-    /// Batches saves to amortize the SQLite write cost across many calls.
-    const ADAPTIVE_SAVE_INTERVAL: u64 = 100;
-
-    fn maybe_flush_adaptive_state(&mut self) {
-        if self.adaptive_save_counter.is_multiple_of(Self::ADAPTIVE_SAVE_INTERVAL) {
-            let state = self.adaptive.export_state();
-            for (tool, err_count, succ_count) in &state {
-                self.history.save_adaptive_state(tool, *err_count, *succ_count);
-            }
-        }
-        self.adaptive_save_counter += 1;
     }
 
     /// Convert max_repeats to a block threshold based on strictness.
@@ -521,7 +361,6 @@ mod tests {
                 max_repeats: None,
                 count_mode: None,
                 volatile_fields: vec!["request_id".into()],
-                error_detection: None,
             }],
             ..Default::default()
         };

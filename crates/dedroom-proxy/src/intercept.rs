@@ -192,6 +192,12 @@ pub async fn process_tools_through_pipeline(
     agent_id: Option<&str>,
     shadow_mode: bool,
 ) -> (Vec<ToolCall>, Option<Value>) {
+    // Drain pending healing outcomes from the PREVIOUS request.
+    // These were stored by `SelfHealingEngine::generate_hint` when it
+    // injected a healing hint. We evaluate them against THIS request's
+    // results to determine if the mutation succeeded.
+    let pending_outcomes = pipeline.healing_engine.drain_pending_outcomes();
+
     let mut allowed_tools = Vec::new();
     let mut blocked_tools = Vec::new();
 
@@ -203,11 +209,6 @@ pub async fn process_tools_through_pipeline(
             result: tool.result.clone(),
             is_error: tool.is_error,
         };
-
-        // Extract judgment/reflection if present
-        if let Some(thought) = &tool.agent_thought {
-            pipeline.judgment_preservation.extract_reflection(thought);
-        }
 
         let result = pipeline.process_tool_call(&tc, agent_id).await;
         let latency_us = t0.elapsed().as_micros() as u64;
@@ -229,7 +230,7 @@ pub async fn process_tools_through_pipeline(
 
         // Extract compression stats if available, or 100% if blocked
         let (original_tokens, compressed_tokens, compression_ratio) = if result.loop_verdict.is_blocked() {
-            let orig = dedroom_core::compression::estimate_tokens(tool.result.as_deref().unwrap_or(""));
+            let orig = (tool.result.as_deref().unwrap_or("").len() as f64 / 4.0).ceil() as u64;
             (Some(orig), Some(0), Some(1.0))
         } else {
             result
@@ -294,6 +295,18 @@ pub async fn process_tools_through_pipeline(
             blocked_tools.push((tc, result));
         } else {
             allowed_tools.push(tc);
+        }
+    }
+
+    // Evaluate pending healing outcomes from the previous request.
+    // A tool is a "success" if it appears in allowed_tools but NOT in
+    // blocked_tools, meaning the agent broke the loop.
+    for (tool_name, strategy) in pending_outcomes {
+        let is_blocked = blocked_tools.iter().any(|(tc, _)| tc.name == tool_name);
+        let is_allowed = allowed_tools.iter().any(|tc| tc.name == tool_name);
+        if is_blocked || is_allowed {
+            let success = is_allowed && !is_blocked;
+            pipeline.healing_engine.report_outcome(&tool_name, &strategy, success);
         }
     }
 
@@ -556,7 +569,7 @@ mod tests {
         use dedroom_core::DedrooMConfig;
 
         let config = DedrooMConfig::default();
-        let pipeline = Pipeline::new(config, None);
+        let pipeline = Pipeline::new(config);
 
         let blocked = vec![(
             ToolCall {
@@ -596,7 +609,7 @@ mod tests {
               max_repeats: 2
         "#;
         let config = DedrooMConfig::from_yaml_str(yaml).unwrap();
-        let mut pipeline = Pipeline::new(config, None);
+        let mut pipeline = Pipeline::new(config);
 
         // ── Setup: tempdir-backed event log ─────────────────────────────
 
@@ -714,6 +727,173 @@ mod tests {
         assert!(!hash_0.is_empty(), "args_hash should be a non-empty hex string");
     }
 
+    /// Verifies the self-healing outcome feedback loop:
+    ///
+    /// 1. Request N: Tool A loops → blocked with healing hint → strategy stored
+    /// 2. Request N+1: Tool A returns with different args → allowed
+    /// 3. Pending outcome is drained at start of Request N+1
+    /// 4. After processing, the outcome is evaluated: Tool A is allowed, not blocked → SUCCESS
+    /// 5. `report_outcome()` records it in memory
+    #[tokio::test]
+    async fn test_healing_outcome_feedback_loop_reports_success() {
+        use dedroom_core::DedrooMConfig;
+
+        // ── Setup: low max_repeats so we hit a block quickly ────────────
+        let yaml = r#"
+            loop_detection:
+              max_repeats: 2
+            self_healing:
+              enabled: true
+              mode: Balanced
+        "#;
+        let config = DedrooMConfig::from_yaml_str(yaml).unwrap();
+        let mut pipeline = Pipeline::new(config);
+
+        // ── Request 1-3: Same tool loops until blocked ──────────────────
+        let looping_tool = ExtractedTool {
+            name: "list_files".into(),
+            args: r#"{"path":"/"}"#.into(),
+            result: Some("error: permission denied".into()),
+            is_error: true,
+            agent_thought: None,
+        };
+
+        // Call 1: allowed (first occurrence)
+        let (allowed, blocked) = process_tools_through_pipeline(
+            &mut pipeline,
+            vec![looping_tool.clone()],
+            None, None, None, false,
+        ).await;
+        assert_eq!(allowed.len(), 1);
+        assert!(blocked.is_none());
+
+        // Call 2: allowed (second occurrence, threshold not yet hit)
+        let (allowed, blocked) = process_tools_through_pipeline(
+            &mut pipeline,
+            vec![looping_tool.clone()],
+            None, None, None, false,
+        ).await;
+        assert_eq!(allowed.len(), 1);
+        assert!(blocked.is_none());
+
+        // Call 3: BLOCKED with healing hint (max_repeats=2 → 3rd call blocked)
+        let (allowed, blocked) = process_tools_through_pipeline(
+            &mut pipeline,
+            vec![looping_tool.clone()],
+            None, None, None, false,
+        ).await;
+        assert_eq!(allowed.len(), 0, "3rd call should be blocked");
+        assert!(blocked.is_some(), "3rd call should return blocked response");
+
+        // Memory should be empty — no outcome evaluated yet
+        assert_eq!(pipeline.healing_engine.total_attempts(), 0);
+
+        // ── Request 4: Tool comes back with DIFFERENT args (agent adapted) ──
+        let adapted_tool = ExtractedTool {
+            name: "list_files".into(),
+            args: r#"{"path":"/tmp","pattern":"*.txt"}"#.into(),
+            result: Some("found 3 matching files".into()),
+            is_error: false,
+            agent_thought: None,
+        };
+
+        let (allowed, blocked) = process_tools_through_pipeline(
+            &mut pipeline,
+            vec![adapted_tool],
+            None, None, None, false,
+        ).await;
+
+        // Adapted call is allowed (new args → new hash → no loop detected)
+        assert_eq!(allowed.len(), 1);
+        assert!(blocked.is_none());
+
+        // The outcome from Request N's healing hint should have been
+        // evaluated: Tool was in allowed_tools with different args → SUCCESS
+        assert_eq!(
+            pipeline.healing_engine.total_attempts(),
+            1,
+            "healing memory should have 1 recorded outcome"
+        );
+        assert_eq!(
+            pipeline.healing_engine.successful_recoveries(),
+            1,
+            "the recovery should be recorded as successful"
+        );
+    }
+
+    /// Verifies the self-healing outcome feedback loop for FAILURE:
+    /// When the tool continues to be blocked on the next request, the
+    /// outcome should be reported as failure.
+    #[tokio::test]
+    async fn test_healing_outcome_feedback_loop_reports_failure() {
+        use dedroom_core::DedrooMConfig;
+
+        // ── Setup: max_repeats: 2 means calls 1-2 allowed, 3+ blocked ────
+        let yaml = r#"
+            loop_detection:
+              max_repeats: 2
+            self_healing:
+              enabled: true
+              mode: Balanced
+        "#;
+        let config = DedrooMConfig::from_yaml_str(yaml).unwrap();
+        let mut pipeline = Pipeline::new(config);
+
+        // ── Calls 1-3: Same tool loops until blocked ────────────────────
+        let tool = ExtractedTool {
+            name: "search".into(),
+            args: r#"{"query":"test"}"#.into(),
+            result: Some("some result".into()),
+            is_error: true,
+            agent_thought: None,
+        };
+
+        // Call 1: allowed
+        let (allowed, blocked) = process_tools_through_pipeline(
+            &mut pipeline,
+            vec![tool.clone()],
+            None, None, None, false,
+        ).await;
+        assert_eq!(allowed.len(), 1);
+
+        // Call 2: allowed
+        let (allowed, blocked) = process_tools_through_pipeline(
+            &mut pipeline,
+            vec![tool.clone()],
+            None, None, None, false,
+        ).await;
+        assert_eq!(allowed.len(), 1);
+
+        // Call 3: BLOCKED with healing hint (max_repeats=2 → 3rd call blocked)
+        let (allowed, blocked) = process_tools_through_pipeline(
+            &mut pipeline,
+            vec![tool.clone()],
+            None, None, None, false,
+        ).await;
+        assert_eq!(allowed.len(), 0);
+        assert!(blocked.is_some());
+
+        // Memory should be empty — no outcome evaluated yet
+        assert_eq!(pipeline.healing_engine.total_attempts(), 0);
+
+        // ── Call 4: STILL blocked (agent didn't adapt) ───────────────────
+        let (allowed, blocked) = process_tools_through_pipeline(
+            &mut pipeline,
+            vec![tool.clone()],
+            None, None, None, false,
+        ).await;
+        assert_eq!(allowed.len(), 0);
+        assert!(blocked.is_some());
+
+        // The outcome from call 3 should have been evaluated.
+        // Tool appeared in blocked_tools → outcome was reported.
+        assert_eq!(
+            pipeline.healing_engine.total_attempts(),
+            1,
+            "healing memory should have 1 recorded outcome"
+        );
+    }
+
     /// Verifies that `process_tools_through_pipeline` WITHOUT shadow mode
     /// still blocks tools normally (regression guard).
     #[tokio::test]
@@ -725,7 +905,7 @@ mod tests {
               max_repeats: 2
         "#;
         let config = DedrooMConfig::from_yaml_str(yaml).unwrap();
-        let mut pipeline = Pipeline::new(config, None);
+        let mut pipeline = Pipeline::new(config);
 
         let tools: Vec<ExtractedTool> = (0..4)
             .map(|_| ExtractedTool {

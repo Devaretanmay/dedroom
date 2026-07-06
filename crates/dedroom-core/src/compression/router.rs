@@ -16,36 +16,33 @@ impl ContentRouter {
 
     /// Detect the content type of a string.
     pub fn detect_type(&self, content: &str) -> ContentType {
-        // Try parsing as JSON
+        self.detect_type_with_value(content).0
+    }
+
+    /// Detect content type, returning the parsed JSON `Value` when the
+    /// content is valid JSON so the caller can reuse it and avoid a
+    /// second `serde_json::from_str`.
+    pub fn detect_type_with_value(&self, content: &str) -> (ContentType, Option<serde_json::Value>) {
+        // Try parsing as JSON — return the parsed value for reuse
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
-            return match val {
+            let ct = match &val {
                 serde_json::Value::Array(_) => ContentType::JsonArray,
-                serde_json::Value::Object(_) => ContentType::JsonObject,
                 _ => ContentType::JsonObject,
             };
+            return (ct, Some(val));
         }
 
         // Check for code-like patterns
         if looks_like_code(content) {
-            return ContentType::Code;
+            return (ContentType::Code, None);
         }
 
         // Check for log patterns
         if looks_like_logs(content) {
-            return ContentType::Log;
+            return (ContentType::Log, None);
         }
 
-        // Check for diff patterns
-        if content.starts_with("---") || content.starts_with("+++") || content.contains("\n@@") {
-            return ContentType::Diff;
-        }
-
-        // Check for search results (grep/ripgrep)
-        if content.lines().count() > 3 && content.lines().all(|l| l.contains(':') || l.is_empty()) {
-            return ContentType::SearchResults;
-        }
-
-        ContentType::Text
+        (ContentType::Text, None)
     }
 
     /// Maximum input tokens before truncation.
@@ -137,12 +134,5 @@ mod tests {
         assert_eq!(router.detect_type("Just a plain sentence."), ContentType::Text);
     }
 
-    #[test]
-    fn test_detect_diff() {
-        let router = ContentRouter::new(&ContentRouterConfig::default());
-        assert_eq!(
-            router.detect_type("--- a/file\n+++ b/file\n@@ -1,3 +1,4 @@\n old text\n+new text"),
-            ContentType::Diff,
-        );
-    }
+
 }

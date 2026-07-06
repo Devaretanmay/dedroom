@@ -71,7 +71,7 @@ impl AppState {
         }
 
         Self {
-            default_pipeline: Arc::new(Mutex::new(Pipeline::new(config.clone(), None))),
+            default_pipeline: Arc::new(Mutex::new(Pipeline::new(config.clone()))),
             config: Arc::new(RwLock::new(config)),
             proxy_config: Arc::new(RwLock::new(proxy_config)),
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -89,7 +89,7 @@ impl AppState {
                 let mut sessions = self.sessions.lock().await;
                 sessions
                     .entry(id.to_string())
-                    .or_insert_with(|| Arc::new(Mutex::new(Pipeline::new(config_clone, None))))
+                    .or_insert_with(|| Arc::new(Mutex::new(Pipeline::new(config_clone))))
                     .clone()
             }
             None => self.default_pipeline.clone(),
@@ -102,7 +102,7 @@ impl AppState {
         *config_write = new_config.clone();
         
         let mut default_pipeline = self.default_pipeline.lock().await;
-        *default_pipeline = Pipeline::new(new_config.clone(), None);
+        *default_pipeline = Pipeline::new(new_config.clone());
         // Existing sessions keep their old config; only the default is replaced.
     }
 }

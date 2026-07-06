@@ -12,7 +12,7 @@ use dedroom_core::config::{
     ContentRouterConfig, DedrooMConfig, LoopDetectionConfig,
 };
 use dedroom_core::compression::{
-    ContentRouter, compress_json_array, compress_code, compress_logs, compress_text, estimate_tokens,
+    ContentRouter, compress_json_array, compress_code, compress_logs, compress_text,
 };
 use dedroom_core::loop_detection::LoopDetector;
 use dedroom_core::pipeline::{Pipeline, ToolCall};
@@ -260,8 +260,6 @@ fn bench_loop_detection() {
     {
         let mut detector = LoopDetector::new(&LoopDetectionConfig {
             volatile_fields: dedroom_core::config::VolatileFieldConfig {
-                auto_inference: true,
-                min_occurrences: 2,
                 configured: vec![
                     dedroom_core::config::ConfiguredVolatileField {
                         tool: "search".into(),
@@ -329,7 +327,7 @@ fn bench_compression() {
     {
         for size in [10usize, 100, 1000] {
             let json = gen_large_json_array(size);
-            let tokens = estimate_tokens(&json);
+            let tokens = (json.len() as f64 / 4.0).ceil() as u64;
 
             let iters = match size {
                 10 => 500,
@@ -445,7 +443,7 @@ fn bench_pipeline() {
     // 4a. First call (allow + compress)
     {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config, None);
+        let mut pipeline = Pipeline::new(config);
 
         let json = gen_large_json_array(100);
         let tool = ToolCall {
@@ -464,7 +462,7 @@ fn bench_pipeline() {
     // 4b. Loop detection through pipeline (block)
     {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config, None);
+        let mut pipeline = Pipeline::new(config);
 
         let tool = ToolCall {
             name: "write_file".into(),
@@ -487,7 +485,7 @@ fn bench_pipeline() {
     // 4c. Full pipeline with large result
     {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config, None);
+        let mut pipeline = Pipeline::new(config);
 
         let json = gen_large_json_array(1000);
         let tool = ToolCall {
@@ -505,7 +503,7 @@ fn bench_pipeline() {
     // 4d. Pipeline with error loop (hint injection)
     {
         let config = DedrooMConfig::default();
-        let mut pipeline = Pipeline::new(config, None);
+        let mut pipeline = Pipeline::new(config);
 
         let tool = ToolCall {
             name: "write_file".into(),
@@ -526,7 +524,7 @@ fn bench_pipeline() {
 
     // 4e. Savings ledger recording speed
     {
-        let mut pipeline = Pipeline::new(DedrooMConfig::default(), None);
+        let mut pipeline = Pipeline::new(DedrooMConfig::default());
 
         let tool = ToolCall {
             name: "read_file".into(),
@@ -551,18 +549,18 @@ fn bench_compression_quality() {
     for size in [10usize, 100, 1000] {
         let json = gen_large_json_array(size);
         if let Ok(result) = compress_json_array(&json, 0.3) {
-            let original_tokens = estimate_tokens(&json);
-            let compressed_tokens = estimate_tokens(&result.content);
-            let reduction = if original_tokens > 0 {
-                (1.0 - compressed_tokens as f64 / original_tokens as f64) * 100.0
+            let orig_tok = (json.len() as f64 / 4.0).ceil() as u64;
+            let compr_tok = (result.content.len() as f64 / 4.0).ceil() as u64;
+            let reduction = if orig_tok > 0 {
+                (1.0 - compr_tok as f64 / orig_tok as f64) * 100.0
             } else {
                 0.0
             };
             println!("  {:<30} rows={:>5}  orig={:>6} tok  comp={:>6} tok  {:+>5.1}% reduction  rows kept: {}/{}",
                 "SmartCrusher",
                 size,
-                original_tokens,
-                compressed_tokens,
+                orig_tok,
+                compr_tok,
                 reduction,
                 result.compressed_count,
                 result.original_count,
@@ -573,19 +571,19 @@ fn bench_compression_quality() {
     // CodeCompressor
     for funcs in [5usize, 10, 20] {
         let code = gen_code(funcs);
-        let original_tokens = estimate_tokens(&code);
+        let orig_tok = (code.len() as f64 / 4.0).ceil() as u64;
         let compressed = compress_code(&code, "rust");
-        let compressed_tokens = estimate_tokens(&compressed);
-        let reduction = if original_tokens > 0 {
-            (1.0 - compressed_tokens as f64 / original_tokens as f64) * 100.0
+        let compr_tok = (compressed.len() as f64 / 4.0).ceil() as u64;
+        let reduction = if orig_tok > 0 {
+            (1.0 - compr_tok as f64 / orig_tok as f64) * 100.0
         } else {
             0.0
         };
         println!("  {:<30} funcs={:>3}  orig={:>6} tok  comp={:>6} tok  {:+>5.1}% reduction",
             "CodeCompressor",
             funcs,
-            original_tokens,
-            compressed_tokens,
+            orig_tok,
+            compr_tok,
             reduction,
         );
     }
@@ -593,19 +591,19 @@ fn bench_compression_quality() {
     // LogCompressor
     for size in [100usize, 1000] {
         let logs = gen_logs_with_duplicates(size, 0.1);
-        let original_tokens = estimate_tokens(&logs);
+        let orig_tok = (logs.len() as f64 / 4.0).ceil() as u64;
         let compressed = compress_logs(&logs);
-        let compressed_tokens = estimate_tokens(&compressed);
-        let reduction = if original_tokens > 0 {
-            (1.0 - compressed_tokens as f64 / original_tokens as f64) * 100.0
+        let compr_tok = (compressed.len() as f64 / 4.0).ceil() as u64;
+        let reduction = if orig_tok > 0 {
+            (1.0 - compr_tok as f64 / orig_tok as f64) * 100.0
         } else {
             0.0
         };
         println!("  {:<30} lines={:>4}  orig={:>6} tok  comp={:>6} tok  {:+>5.1}% reduction",
             "LogCompressor",
             size,
-            original_tokens,
-            compressed_tokens,
+            orig_tok,
+            compr_tok,
             reduction,
         );
     }

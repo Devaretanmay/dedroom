@@ -8,6 +8,6 @@ mod savings_ledger;
 
 pub use event_log::{EventLog, ProxyEvent};
 pub use savings_ledger::{
-    SavingsLedger, SavingsReport,
-    CompressionSaving, LoopBlockSaving,
+    SavingsLedger, SavingsReport, AttributionReport,
+    WasteBreakdown, ToolBreakdown,
 };

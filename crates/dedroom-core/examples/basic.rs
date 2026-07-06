@@ -3,7 +3,7 @@
 /// Run with: cargo run --example basic
 use dedroom_core::config::DedrooMConfig;
 use dedroom_core::loop_detection::LoopDetector;
-use dedroom_core::compression::{ContentRouter, compress_json_array, estimate_tokens};
+use dedroom_core::compression::{ContentRouter, compress_json_array};
 use dedroom_core::config::ContentRouterConfig;
 
 fn main() {
@@ -61,7 +61,9 @@ loop_detection:
         Ok(result) => {
             println!("  Original: {} rows → Compressed: {} rows ({} dropped)",
                 result.original_count, result.compressed_count, result.rows_dropped);
-            println!("  Compression ratio: {:.1}%", estimate_tokens(json_input) as f64 / estimate_tokens(&result.content) as f64 * 100.0);
+            let orig = (json_input.len() as f64 / 4.0).ceil() as f64;
+            let compr = (result.content.len() as f64 / 4.0).ceil() as f64;
+            println!("  Compression ratio: {:.1}%", orig / compr * 100.0);
             println!("  Output: {}", result.content);
         }
         Err(e) => println!("  Error: {}", e),

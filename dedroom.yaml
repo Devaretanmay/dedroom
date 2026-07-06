@@ -1,0 +1,91 @@
+# DedrooM Configuration
+# ======================
+# DedrooM is an intelligent middleware proxy that intercepts AI agent tool
+# calls to detect loops, compress context, and self-heal from repeated failures.
+#
+# Usage:
+#   dedroom proxy              # uses dedroom.yaml by default
+#   dedroom proxy --config my-config.yaml
+
+# ── Loop Detection ──────────────────────────────────────────────────────────
+# Detects and blocks repeated tool calls before they waste API tokens.
+loop_detection:
+  enabled: true
+  max_repeats: 3               # How many identical calls before blocking
+  strictness: Balanced         # Lenient | Balanced | Strict
+  count_mode: All              # All | ErrorsOnly
+  history_backend: memory      # memory | sqlite (requires --features sqlite)
+  # history_path: "loop_history.db"  # only used when backend is sqlite
+
+  # Adaptive thresholding: dynamically lowers the repeat threshold
+  # when the agent enters an error loop.
+  adaptive:
+    enabled: true
+    error_reduction: 1         # Reduce max_repeats by this many on errors
+    min_repeats: 2             # Floor: never reduce below this
+
+  # Per-tool overrides for fine-grained control.
+  tools: []
+  # Example per-tool override:
+  # tools:
+  #   - name: read_file
+  #     max_repeats: 5
+  #   - name: web_search
+  #     volatile_fields: ["request_id", "session"]
+
+# ── Context Compression ─────────────────────────────────────────────────────
+# Compresses tool outputs before sending to the LLM, saving tokens.
+compression:
+  enabled: true
+  content_router:
+    max_input_tokens: 100000
+    append_only: true
+  compressors:
+    smart_crusher: true        # JSON array compression (best for search results)
+    code_compressor: true      # Code file compression
+    log_compressor: true       # Log file compression
+    text_compressor: false     # General text compression (experimental)
+  ccr:
+    backend: memory            # memory | sqlite (requires --features sqlite)
+    ttl_seconds: 1800          # How long to cache compressed results
+    # path: "ccr_cache.db"     # only used when backend is sqlite
+
+# ── Loop–Compression Coupling ───────────────────────────────────────────────
+# When a loop is detected, automatically tighten compression to reduce costs
+# and inject helpful hints into the response.
+loop_compression_coupling:
+  enabled: true
+  on_detected:
+    compression_budget: Aggressive
+    inject_hint: false
+  on_error_loop:
+    compression_budget: Maximum
+    inject_hint: true
+    hint_template: "You are looping on '{tool}'. Try a completely different approach."
+  on_recovery:
+    compression_budget: Moderate
+    fresh_context_window: 3
+
+# ── Self-Healing ────────────────────────────────────────────────────────────
+# When loop detection blocks a tool call, the self-healing engine generates
+# alternative strategies (parameter tweaks, tool substitutions, decomposition,
+# rephrase) and injects them as actionable hints.
+#
+# The engine learns from past outcomes via healing memory. Using SQLite
+# persistence, these lessons survive proxy restarts.
+self_healing:
+  enabled: true
+  mode: Balanced               # Conservative | Balanced | Aggressive
+  memory_backend: memory       # memory | sqlite (requires --features sqlite)
+  # memory_path: "healing_memory.db"  # only used when backend is sqlite
+  #
+  # To enable persistent healing memory across restarts:
+  #   cargo build --features sqlite
+  #   memory_backend: sqlite
+  #   memory_path: "healing_memory.db"
+
+# ── Security (PII Redaction) ────────────────────────────────────────────────
+security:
+  redaction_enabled: true
+  context_detection: true
+  audit_log: true

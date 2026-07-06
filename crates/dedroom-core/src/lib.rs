@@ -23,13 +23,10 @@ pub mod config;
 pub mod loop_detection;
 pub mod compression;
 pub mod ccr;
-pub mod embedding;
 pub mod telemetry;
 pub mod security;
-pub mod attribution;
 pub mod pipeline;
-pub mod intelligence;
-
+pub mod healing;
 // Re-export the top-level API
 pub use config::DedrooMConfig;
 pub use pipeline::Pipeline;

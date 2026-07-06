@@ -3,8 +3,7 @@
 //! Detects and redacts sensitive information from tool call payloads using:
 //!
 //! - **Regex patterns** — known secret formats (AWS keys, GitHub tokens, JWTs, etc.)
-//! - **Entropy analysis** — high-entropy strings that look like secrets
-//! - **Context-aware detection** — field names like `password`, `token`, `secret`
+//! - **Context-aware field detection** — field names like `password`, `token`, `secret`
 //!
 //! Run this **before** compression so secrets are never stored in the CCR cache
 //! or sent to the LLM.
@@ -20,10 +19,6 @@ use std::collections::HashSet;
 pub struct RedactionConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_entropy_threshold")]
-    pub entropy_threshold: f64,
-    #[serde(default = "default_true")]
-    pub entropy_detection: bool,
     #[serde(default = "default_true")]
     pub context_detection: bool,
     #[serde(default = "default_true")]
@@ -40,8 +35,6 @@ impl Default for RedactionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            entropy_threshold: 4.5,
-            entropy_detection: true,
             context_detection: true,
             audit_log: true,
             custom_patterns: Vec::new(),
@@ -59,7 +52,6 @@ pub struct CustomPattern {
 }
 
 fn default_true() -> bool { true }
-fn default_entropy_threshold() -> f64 { 4.5 }
 
 // ── Report ─────────────────────────────────────────────────────────────────
 
@@ -67,7 +59,6 @@ fn default_entropy_threshold() -> f64 { 4.5 }
 pub struct RedactionReport {
     pub total_redacted: usize,
     pub pattern_matches: usize,
-    pub entropy_matches: usize,
     pub context_matches: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<RedactedItem>,
@@ -84,9 +75,7 @@ pub struct RedactedItem {
 #[serde(rename_all = "snake_case")]
 pub enum RedactionMethod {
     Pattern,
-    Entropy,
     Context,
-    Custom,
 }
 
 // ── Redaction Engine ───────────────────────────────────────────────────────
@@ -151,7 +140,7 @@ impl RedactionEngine {
                 report.pattern_matches += matches.len();
                 for m in &matches {
                     report.items.push(RedactedItem {
-                        method: RedactionMethod::Custom,
+                        method: RedactionMethod::Pattern,
                         label: label.clone(),
                         length: m.len(),
                     });
@@ -160,20 +149,14 @@ impl RedactionEngine {
             }
         }
 
-        // 2. Context-aware redaction
+        // 2. Context-aware redaction — walk JSON tree, redact sensitive field values
         if self.config.context_detection {
-            let (ctx_out, ctx_report) = self.redact_context_aware(&output);
-            output = ctx_out;
-            report.context_matches = ctx_report.context_matches;
-            report.items.extend(ctx_report.items);
-        }
-
-        // 3. Entropy-based redaction
-        if self.config.entropy_detection {
-            let (ent_out, ent_report) = self.redact_high_entropy(&output);
-            output = ent_out;
-            report.entropy_matches = ent_report.entropy_matches;
-            report.items.extend(ent_report.items);
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&output) {
+                let (redacted, ctx_matches) = self.redact_context_aware(&value);
+                output = serde_json::to_string(&redacted).unwrap_or(output);
+                report.context_matches = ctx_matches.len();
+                report.items.extend(ctx_matches);
+            }
         }
 
         report.total_redacted = report.items.len();
@@ -184,161 +167,51 @@ impl RedactionEngine {
         (output, report)
     }
 
-    fn redact_context_aware(&self, input: &str) -> (String, RedactionReport) {
-        let mut output = input.to_string();
-        let mut report = RedactionReport::default();
-
-        let fields: Vec<&str> = self.sensitive_fields.iter().map(|s| s.as_str()).collect();
-        let field_pattern = fields.join("|");
-
-        // Match: "<field>": "value" (JSON style) or <field> = "value"
-        // (assignment style like env vars)
-        let context_re = match Regex::new(&format!(
-            r#"(?i)"?({})"?\s*[:=]\s*"([^"]+)""#,
-            field_pattern,
-        )) {
-            Ok(re) => re,
-            Err(_) => return (output, report),
-        };
-
-        let mut replacements: Vec<(usize, usize, String)> = Vec::new();
-        for cap in context_re.captures_iter(&output) {
-            let full_match = cap.get(0).unwrap();
-            let field_name = cap.get(1).unwrap();
-            let value = cap.get(2).unwrap();
-
-            report.context_matches += 1;
-            report.items.push(RedactedItem {
-                method: RedactionMethod::Context,
-                label: format!("field: {:?}", value.as_str()),
-                length: value.len(),
-            });
-
-            let replacement = format!("{}[REDACTED]", &output[field_name.start()..value.start()]);
-            replacements.push((full_match.start(), value.end(), replacement));
-        }
-
-        // Apply right-to-left (reverse order by start position)
-        replacements.sort_unstable_by_key(|k| std::cmp::Reverse(k.0));
-        for (start, end, replacement) in &replacements {
-            output.replace_range(*start..*end, replacement);
-        }
-
-        (output, report)
-    }
-
-    fn redact_high_entropy(&self, input: &str) -> (String, RedactionReport) {
-        let mut report = RedactionReport::default();
-
-        let output = match serde_json::from_str::<serde_json::Value>(input) {
-            Ok(value) => {
-                let redacted = self.redact_high_entropy_value(&value, &mut report);
-                serde_json::to_string(&redacted).unwrap_or_else(|_| input.to_string())
-            }
-            Err(_) => self.scan_entropy_tokens(input, &mut report),
-        };
-
-        (output, report)
-    }
-
-    fn redact_high_entropy_value(
+    fn redact_context_aware(
         &self,
         value: &serde_json::Value,
-        report: &mut RedactionReport,
-    ) -> serde_json::Value {
+    ) -> (serde_json::Value, Vec<RedactedItem>) {
         match value {
-            serde_json::Value::String(s) => {
-                if self.is_high_entropy(s) && s.len() >= 16 {
-                    report.entropy_matches += 1;
-                    report.items.push(RedactedItem {
-                        method: RedactionMethod::Entropy,
-                        label: format!("high-entropy string ({} chars)", s.len()),
-                        length: s.len(),
-                    });
-                    serde_json::Value::String("[REDACTED]".to_string())
-                } else {
-                    serde_json::Value::String(s.clone())
-                }
-            }
             serde_json::Value::Object(map) => {
                 let mut new_map = serde_json::Map::new();
+                let mut items = Vec::new();
                 for (k, v) in map {
-                    if self.sensitive_fields.contains(k) && let serde_json::Value::String(s) = v {
-                        report.context_matches += 1;
-                        report.items.push(RedactedItem {
-                            method: RedactionMethod::Context,
-                            label: format!("field: {:?}", k),
-                            length: s.len(),
-                        });
-                        new_map.insert(k.clone(), serde_json::Value::String("[REDACTED]".into()));
-                        continue;
+                    if self.sensitive_fields.contains(k) {
+                        if let serde_json::Value::String(s) = v {
+                            report_context_match(&mut items, k, s.len());
+                            new_map.insert(k.clone(), serde_json::Value::String("[REDACTED]".into()));
+                            continue;
+                        }
                     }
-                    new_map.insert(k.clone(), self.redact_high_entropy_value(v, report));
+                    let (new_val, sub_items) = self.redact_context_aware(v);
+                    items.extend(sub_items);
+                    new_map.insert(k.clone(), new_val);
                 }
-                serde_json::Value::Object(new_map)
+                (serde_json::Value::Object(new_map), items)
             }
             serde_json::Value::Array(arr) => {
-                let new_arr: Vec<_> = arr.iter().map(|v| self.redact_high_entropy_value(v, report)).collect();
-                serde_json::Value::Array(new_arr)
+                let mut items = Vec::new();
+                let new_arr: Vec<_> = arr
+                    .iter()
+                    .map(|v| {
+                        let (nv, mut sub) = self.redact_context_aware(v);
+                        items.append(&mut sub);
+                        nv
+                    })
+                    .collect();
+                (serde_json::Value::Array(new_arr), items)
             }
-            other => other.clone(),
+            other => (other.clone(), Vec::new()),
         }
     }
+}
 
-    fn scan_entropy_tokens(&self, input: &str, report: &mut RedactionReport) -> String {
-        let mut output = input.to_string();
-
-        let tokens: Vec<String> = input
-            .split_whitespace()
-            .map(|t| t.trim_matches(|c: char| c.is_ascii_punctuation()))
-            .filter(|t| t.len() >= 16)
-            .map(|t| t.to_string())
-            .collect();
-
-        let mut seen = HashSet::new();
-        for token in &tokens {
-            if seen.contains(token) || !self.is_high_entropy(token) {
-                continue;
-            }
-            seen.insert(token.clone());
-            report.entropy_matches += 1;
-            report.items.push(RedactedItem {
-                method: RedactionMethod::Entropy,
-                label: format!("high-entropy token ({} chars)", token.len()),
-                length: token.len(),
-            });
-            output = output.replace(token, "[REDACTED]");
-        }
-
-        output
-    }
-
-    fn calculate_entropy(&self, s: &str) -> f64 {
-        if s.is_empty() {
-            return 0.0;
-        }
-        let bytes = s.as_bytes();
-        let len = bytes.len() as f64;
-
-        let mut freq = [0u64; 256];
-        for &b in bytes {
-            freq[b as usize] += 1;
-        }
-
-        let mut entropy = 0.0_f64;
-        for &count in freq.iter() {
-            if count > 0 {
-                let p = count as f64 / len;
-                entropy -= p * p.log2();
-            }
-        }
-
-        entropy
-    }
-
-    fn is_high_entropy(&self, s: &str) -> bool {
-        s.len() >= 16 && self.calculate_entropy(s) >= self.config.entropy_threshold
-    }
+fn report_context_match(items: &mut Vec<RedactedItem>, field: &str, length: usize) {
+    items.push(RedactedItem {
+        method: RedactionMethod::Context,
+        label: format!("field: {field:?}"),
+        length,
+    });
 }
 
 // ── Built-in patterns ──────────────────────────────────────────────────────
@@ -350,14 +223,13 @@ fn compile_builtin_patterns() -> Vec<(String, Regex)> {
     patterns.push(("AWS Access Key ID", "AKIA[0-9A-Z]{16}"));
     // AWS Secret Access Key
     patterns.push(("AWS Secret Key",
-        r#"(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*['"]?[a-zA-Z0-9/+=]{40}['"]?"#));
+        r#"(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*['\"]?[a-zA-Z0-9/+=]{40}['\"]?"#));
     // GitHub PATs
     patterns.push(("GitHub PAT", "ghp_[a-zA-Z0-9]{36}"));
     patterns.push(("GitHub Fine-Grained PAT", "github_pat_[a-zA-Z0-9]{82}"));
     patterns.push(("GitHub OAuth Token", "gho_[a-zA-Z0-9]{36}"));
     patterns.push(("GitHub Refresh Token", "ghr_[a-zA-Z0-9]{76}"));
-    // JWT -- uses double-quote chars in regex matching, but the pattern itself
-    // does not contain literal double quotes, only escapes
+    // JWT
     patterns.push(("JWT Token",
         "eyJ[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+"));
     // PEM private key
@@ -374,10 +246,10 @@ fn compile_builtin_patterns() -> Vec<(String, Regex)> {
         "https://hooks\\.slack\\.com/services/T[a-zA-Z0-9]{8,10}/B[a-zA-Z0-9]{8,10}/[a-zA-Z0-9]{24}"));
     // Heroku
     patterns.push(("Heroku API Key",
-        r#"(?i)(heroku.*api.*key|heroku.*auth)\s*[:=]\s*['"]?[a-zA-Z0-9-]{20,}['"]?"#));
+        r#"(?i)(heroku.*api.*key|heroku.*auth)\s*[:=]\s*['\"]?[a-zA-Z0-9-]{20,}['\"]?"#));
     // Generic API key
     patterns.push(("Generic API Key",
-        r#"(?i)(api[_-]?key|apikey|api_secret)\s*[:=]\s*['"]?[a-zA-Z0-9]{20,}['"]?"#));
+        r#"(?i)(api[_-]?key|apikey|api_secret)\s*[:=]\s*['\"]?[a-zA-Z0-9]{20,}['\"]?"#));
 
     patterns
         .into_iter()
@@ -423,15 +295,6 @@ fn default_sensitive_fields() -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_entropy_calculation() {
-        let engine = RedactionEngine::default_enabled();
-        let low = engine.calculate_entropy("aaaaaaaaaaaaaaaa");
-        assert!(low < 1.0, "low entropy expected, got {low}");
-        let high = engine.calculate_entropy("aB3$xK9#mP2&qR7@vW5");
-        assert!(high > 4.0, "high entropy expected, got {high}");
-    }
 
     #[test]
     fn test_redact_aws_key() {
@@ -482,23 +345,6 @@ mod tests {
         let engine = RedactionEngine::default_enabled();
         let (out, _) = engine.redact(r#"{"description": "password is common"}"#);
         assert!(!out.contains("[REDACTED]"), "should not redact non-sensitive values");
-    }
-
-    #[test]
-    fn test_entropy_based_redaction_disabling_patterns() {
-        let engine = RedactionEngine {
-            config: RedactionConfig {
-                entropy_threshold: 3.5,
-                context_detection: false,
-                ..Default::default()
-            },
-            builtin_patterns: vec![], custom_patterns: vec![],
-            sensitive_fields: HashSet::new(),
-        };
-        let input = r#"{"key": "aB3$xK9#mP2&qR7@vW5!nL8*yF4"}"#;
-        let (out, report) = engine.redact(input);
-        assert!(!out.contains("aB3$xK9#mP2&qR7@vW5!nL8*yF4"), "high-entropy should be redacted");
-        assert_eq!(report.entropy_matches, 1);
     }
 
     #[test]
@@ -566,18 +412,13 @@ mod tests {
     }
 
     #[test]
-    fn test_short_string_not_flagged() {
-        let engine = RedactionEngine::default_enabled();
-        let (_, report) = engine.redact(r#"{"k": "abc"}"#);
-        assert_eq!(report.entropy_matches, 0);
-    }
-
-    #[test]
-    fn test_context_detection_assignment_style() {
+    fn test_non_json_input_untouched() {
         let engine = RedactionEngine::default_enabled();
         let (out, report) = engine.redact(r#"password = "hunter2""#);
-        assert!(!out.contains("hunter2"));
-        assert_eq!(report.context_matches, 1);
+        // Non-JSON input: context detection only works on JSON Value tree walk
+        // Pattern matching doesn't catch short strings like "hunter2"
+        assert_eq!(out, r#"password = "hunter2""#);
+        assert_eq!(report.total_redacted, 0);
     }
 
     #[test]
@@ -591,11 +432,9 @@ mod tests {
     #[test]
     fn test_each_pattern_compiles() {
         let engine = RedactionEngine::default_enabled();
-        // The engine should have compiled all built-in patterns
         assert!(!engine.builtin_patterns.is_empty(),
             "should have compiled built-in patterns, got {}",
             engine.builtin_patterns.len());
-        // Verify specific known patterns are present
         let labels: Vec<_> = engine.builtin_patterns.iter().map(|(l, _)| l.as_str()).collect();
         assert!(labels.contains(&"AWS Access Key ID"));
         assert!(labels.contains(&"JWT Token"));

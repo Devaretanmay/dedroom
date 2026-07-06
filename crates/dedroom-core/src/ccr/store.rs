@@ -18,10 +18,6 @@ pub struct CcrEntry {
     pub was_error: bool,
     /// Expiration time.
     pub expires_at: Instant,
-    /// Optional tool name for lookup.
-    pub tool: Option<String>,
-    /// Optional canonical args hash for loop detection.
-    pub args_hash: Option<Hash>,
 }
 
 impl CcrEntry {
@@ -30,8 +26,6 @@ impl CcrEntry {
             original,
             was_error,
             expires_at: Instant::now() + ttl,
-            tool: None,
-            args_hash: None,
         }
     }
 }
@@ -190,25 +184,19 @@ impl CcrBackend for SqliteStore {
             .as_secs() as i64
             + remaining.as_secs() as i64;
 
-        let tool = entry.tool.as_deref();
-        let args_hash_bytes = entry.args_hash.as_ref().map(|h| h.as_bytes() as &[u8]);
-
-        // Scope block so the lock guard drops before we call prune_expired
         {
             let conn = self.conn.lock().await;
             let _ = conn.execute(
-                "INSERT OR REPLACE INTO ccr_entries (key_hash, original, was_error, expires_at, tool, args_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR REPLACE INTO ccr_entries (key_hash, original, was_error, expires_at)
+                 VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![
                     key.as_bytes() as &[u8],
                     entry.original,
                     entry.was_error as i32,
                     expires_at_epoch,
-                    tool,
-                    args_hash_bytes,
                 ],
             );
-        } // conn guard dropped here
+        }
 
         // Amortize expired-entry cleanup: only prune every 100 puts.
         let prev = self.put_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -222,7 +210,7 @@ impl CcrBackend for SqliteStore {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT original, was_error, expires_at, tool, args_hash
+                "SELECT original, was_error, expires_at
                  FROM ccr_entries WHERE key_hash = ?1",
             )
             .ok()?;
@@ -232,13 +220,11 @@ impl CcrBackend for SqliteStore {
                 let original: String = row.get(0)?;
                 let was_error: bool = row.get::<_, i32>(1)? != 0;
                 let expires_at_epoch: i64 = row.get(2)?;
-                let tool: Option<String> = row.get(3)?;
-                let args_hash_blob: Option<Vec<u8>> = row.get(4)?;
-                Ok((original, was_error, expires_at_epoch, tool, args_hash_blob))
+                Ok((original, was_error, expires_at_epoch))
             })
             .ok()?;
 
-        let (original, was_error, expires_at_epoch, tool, args_hash_blob) = row;
+        let (original, was_error, expires_at_epoch) = row;
 
         // Check expiry
         let now_epoch = std::time::SystemTime::now()
@@ -254,18 +240,10 @@ impl CcrBackend for SqliteStore {
         let remaining_secs = (expires_at_epoch - now_epoch) as u64;
         let expires_at = Instant::now() + Duration::from_secs(remaining_secs);
 
-        // Parse args_hash blob back to blake3::Hash
-        let args_hash = args_hash_blob.and_then(|b| {
-            let arr: [u8; 32] = <[u8; 32]>::try_from(b).ok()?;
-            Some(blake3::Hash::from_bytes(arr))
-        });
-
         Some(CcrEntry {
             original,
             was_error,
             expires_at,
-            tool,
-            args_hash,
         })
     }
 
@@ -445,22 +423,7 @@ mod tests {
         assert!(entry.is_none());
     }
 
-    #[cfg(feature = "sqlite")]
-    #[tokio::test]
-    async fn test_sqlite_with_tool_and_args_hash() {
-        let store = SqliteStore::new_in_memory(60).unwrap();
-        let key = blake3::hash(b"tool call");
-        let args_hash = blake3::hash(b"args data");
-        let mut entry = CcrEntry::new("result".into(), false, Duration::from_secs(60));
-        entry.tool = Some("write_file".into());
-        entry.args_hash = Some(args_hash);
 
-        store.put(key, entry).await;
-        let retrieved = store.get(&key).await.unwrap();
-        assert_eq!(retrieved.original, "result");
-        assert_eq!(retrieved.tool.as_deref(), Some("write_file"));
-        assert_eq!(retrieved.args_hash, Some(args_hash));
-    }
 
     #[cfg(feature = "sqlite")]
     #[tokio::test]
