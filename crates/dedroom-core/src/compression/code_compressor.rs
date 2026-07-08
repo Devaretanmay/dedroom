@@ -74,6 +74,92 @@ fn compress_via_treesitter(input: &str, language: &str) -> Option<String> {
     Some(result)
 }
 
+/// Detect programming language from content heuristics.
+/// Returns one of "rust", "python", "javascript", or "unknown".
+pub fn detect_language(content: &str) -> &'static str {
+    let lines: Vec<&str> = content.lines().take(10).collect();
+
+    // Check shebang first
+    if let Some(first) = lines.first() {
+        let trimmed = first.trim();
+        if trimmed.starts_with("#!/") {
+            if trimmed.contains("python") {
+                return "python";
+            }
+            if trimmed.contains("node") {
+                return "javascript";
+            }
+            if trimmed.contains("bash") || trimmed.contains("sh") || trimmed.contains("zsh") {
+                return "unknown"; // no tree-sitter grammar for shell
+            }
+            if trimmed.contains("perl") || trimmed.contains("ruby") {
+                return "unknown";
+            }
+        }
+    }
+
+    // Keyword-based detection from first 10 non-empty lines
+    for line in &lines {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // Rust: function items, use statements, impl blocks, pub items, struct/enum/trait/type definitions
+        if t.starts_with("fn ")
+            || t.starts_with("pub ")
+            || t.starts_with("impl")
+            || t.starts_with("use ")
+            || t.starts_with("struct ")
+            || t.starts_with("enum ")
+            || t.starts_with("trait ")
+            || t.starts_with("type ")
+            || t.starts_with("let ")
+            || t.starts_with("const ")
+            || t.starts_with("async fn")
+            || t.starts_with("unsafe ")
+            || t.starts_with("#[")
+            || t.starts_with("mod ")
+        {
+            return "rust";
+        }
+        // Python: def, class, import, from, async def, @decorator, if __name__, with
+        if t.starts_with("def ")
+            || t.starts_with("class ")
+            || t.starts_with("import ")
+            || t.starts_with("from ")
+            || t.starts_with("async def")
+            || t.starts_with("@")
+            || t == "if __name__ == '__main__':"
+        {
+            return "python";
+        }
+        // JavaScript/TypeScript: function, const/let + arrow, import from, export, require, module.exports
+        if t.starts_with("function ")
+            || t.starts_with("export ")
+            || t.starts_with("import ")
+            || t.starts_with("require(")
+            || t.starts_with("module.")
+            || t.contains("=>")
+            || t.starts_with("interface ")
+            || t.starts_with("type ")
+            || t.starts_with("class ")
+        {
+            return "javascript";
+        }
+        // Generic shell/config — skip
+        if t.starts_with("#") || t.starts_with("//") || t.starts_with("echo ") {
+            continue;
+        }
+    }
+
+    // Fallback: look for multi-line Rust-style sigils in the whole content
+    if content.contains("::") || content.contains("fn ") {
+        return "rust";
+    }
+
+    "unknown"
+}
+
 fn resolve_language(language: &str) -> Option<Language> {
     match language {
         "rust" => Some(tree_sitter_rust::LANGUAGE.into()),

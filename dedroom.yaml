@@ -71,18 +71,30 @@ loop_compression_coupling:
 # alternative strategies (parameter tweaks, tool substitutions, decomposition,
 # rephrase) and injects them as actionable hints.
 #
-# The engine learns from past outcomes via healing memory. Using SQLite
-# persistence, these lessons survive proxy restarts.
+# The engine learns from past outcomes via in-memory healing memory that
+# tracks per-tool strategy success rates with args-hash matching.
 self_healing:
   enabled: true
   mode: Balanced               # Conservative | Balanced | Aggressive
-  memory_backend: memory       # memory | sqlite (requires --features sqlite)
-  # memory_path: "healing_memory.db"  # only used when backend is sqlite
-  #
-  # To enable persistent healing memory across restarts:
-  #   cargo build --features sqlite
-  #   memory_backend: sqlite
-  #   memory_path: "healing_memory.db"
+
+  # Instincts: in-memory config rules that fire before any other healing
+  # strategy. Loaded from this config at startup — no database needed.
+  instincts:
+    enabled: true
+    # User-defined rules:
+    # rules:
+    #   - tool: list_files
+    #     condition:
+    #       ParamExceeds: { param: "depth", threshold: 3 }
+    #     action:
+    #       Suggest: "This repo may be large. Set depth=1 and use grep for targeted searches."
+    #     confidence: 0.9
+    #   - tool: write_file
+    #     condition:
+    #       OnError: ~
+    #     action:
+    #       Suggest: "Try edit_file for targeted changes instead of overwriting the entire file."
+    #     confidence: 0.8
 
 # ── Security (PII Redaction) ────────────────────────────────────────────────
 security:

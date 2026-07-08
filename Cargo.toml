@@ -5,7 +5,7 @@ members = [
     "crates/dedroom-proxy",
     "crates/dedroom-cli",
     "crates/dedroom-py",
-
+    "crates/dedroom-tui",
 ]
 default-members = ["crates/dedroom-core", "crates/dedroom-proxy", "crates/dedroom-cli"]
 

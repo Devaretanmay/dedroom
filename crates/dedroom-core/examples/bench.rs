@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use dedroom_core::config::{
-    ContentRouterConfig, DedrooMConfig, LoopDetectionConfig,
+    ContentRouterConfig, DedrooMConfig, LoopDetectionConfig, ToolOverride,
 };
 use dedroom_core::compression::{
     ContentRouter, compress_json_array, compress_code, compress_logs, compress_text,
@@ -259,14 +259,12 @@ fn bench_loop_detection() {
     // 1e. Volatile field stripping speed
     {
         let mut detector = LoopDetector::new(&LoopDetectionConfig {
-            volatile_fields: dedroom_core::config::VolatileFieldConfig {
-                configured: vec![
-                    dedroom_core::config::ConfiguredVolatileField {
-                        tool: "search".into(),
-                        fields: vec!["request_id".into(), "timestamp".into()],
-                    },
-                ],
-            },
+            tools: vec![ToolOverride {
+                name: "search".into(),
+                max_repeats: None,
+                count_mode: None,
+                volatile_fields: vec!["request_id".into(), "timestamp".into()],
+            }],
             ..Default::default()
         });
 

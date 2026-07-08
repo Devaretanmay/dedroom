@@ -29,28 +29,18 @@ pub fn strip_volatile_fields(args_json: &str, volatile_fields: &[&str]) -> Strin
     compact_json(&value)
 }
 
-/// Compact JSON representation for comparison.
+/// Compact JSON representation for comparison (sorted keys).
 fn compact_json(value: &Value) -> String {
     match value {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort();
-            let pairs: Vec<String> = keys
-                .iter()
-                .filter_map(|k| {
-                    map.get(*k).map(|v| format!("\"{}\":{}", k, compact_json(v)))
-                })
+            let obj: serde_json::Map<String, Value> = keys.iter()
+                .map(|k| ((*k).clone(), map[*k].clone()))
                 .collect();
-            format!("{{{}}}", pairs.join(","))
+            serde_json::to_string(&Value::Object(obj)).unwrap_or_default()
         }
-        Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(compact_json).collect();
-            format!("[{}]", items.join(","))
-        }
-        Value::String(s) => format!("\"{}\"", s),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => "null".into(),
+        _ => serde_json::to_string(value).unwrap_or_default(),
     }
 }
 

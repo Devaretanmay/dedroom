@@ -136,9 +136,12 @@ pub async fn health(
     let loop_state = pipeline.current_loop_state();
     drop(pipeline);
 
+    let uptime_secs = state.startup_instant.elapsed().as_secs();
+
     Json(json!({
         "status": "ok",
         "service": "dedroom-proxy",
+        "uptime_seconds": uptime_secs,
         "pipeline": {
             "total_calls_tracked": summary.total_calls,
             "current_loop_state": format!("{loop_state:?}"),
@@ -324,6 +327,44 @@ pub async fn events_stream(
             .interval(std::time::Duration::from_secs(15))
             .text("keep-alive"),
     )
+}
+
+/// GET /admin/learning — healing memory stats.
+pub async fn learning(
+    Extension(state): Extension<Arc<AppState>>,
+) -> impl IntoResponse {
+    let pipeline = state.default_pipeline.lock().await;
+    let stats = pipeline.healing_engine.memory.stats();
+    let total_attempts = pipeline.healing_engine.total_attempts();
+    let total_successes = pipeline.healing_engine.successful_recoveries();
+    drop(pipeline);
+
+    Json(json!({
+        "stats": {
+            "total_attempts": total_attempts,
+            "total_successes": total_successes,
+            "success_rate": if total_attempts > 0 { total_successes as f64 / total_attempts as f64 } else { 0.0 },
+            "by_tool": stats,
+        },
+        "note": "Learning memory uses in-memory HealingMemory with args_hash matching.",
+    }))
+}
+
+/// GET /admin/instincts — active instinct rules (from config).
+pub async fn instincts(
+    Extension(state): Extension<Arc<AppState>>,
+) -> impl IntoResponse {
+    let pipeline = state.default_pipeline.lock().await;
+    let ie = pipeline.healing_engine.instincts_engine();
+    let rules = ie.list_instincts();
+    let count = ie.instinct_count();
+    drop(pipeline);
+
+    Json(json!({
+        "rules": rules,
+        "total": count,
+        "note": "Instincts are loaded from config and are in-memory only.",
+    }))
 }
 
 /// POST /admin/runtime-env — update configuration at runtime.

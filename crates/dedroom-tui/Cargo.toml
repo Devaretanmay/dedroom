@@ -1,0 +1,22 @@
+[package]
+name = "dedroom-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DedrooM TUI Dashboard — real-time savings, loop detection, and healing stats"
+
+[dependencies]
+dedroom-core = { path = "../dedroom-core" }
+tokio = { workspace = true, features = ["time", "sync", "fs", "io-util", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+reqwest = { workspace = true, features = ["json", "stream"] }
+futures = "0.3"
+dirs = "5"
+
+[[bin]]
+name = "dedroom-dash"
+path = "src/main.rs"

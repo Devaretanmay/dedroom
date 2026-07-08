@@ -38,37 +38,54 @@ DedrooM catches both automatically. One command wraps your existing agent (`dedr
 ### 1. Install
 
 ```bash
-# Installs both the Python library and the full CLI (wrap, proxy, doctor, dash)
 pip install dedroom
 ```
 
-### 2. Wrap your agent
+### 2. Start the proxy daemon
 
 ```bash
-# Claude Code
-dedroom wrap claude
-
-# OpenAI Codex CLI
-dedroom wrap codex
-
-# OpenCode with free models
-dedroom wrap opencode \
-  --upstream-url https://opencode.ai/zen \
-  --api-key "sk-your-key" \
-  -- run -m dedroom/deepseek-v4-flash-free "your task"
+dedroom init
 ```
 
-### 3. Stop with Ctrl+C
+Starts the proxy in the background and prints the shell exports you need. Run the
+eval command it shows to route your agents through DedrooM:
 
-That's it the proxy starts, routes all API traffic through the pipeline, and shuts down cleanly when you're done.
+```bash
+eval "$(dedroom init)"
+```
+
+Add the exports to your `~/.zshrc` / `~/.bashrc` to make them permanent.
+
+### 3. Use your agent as normal
+
+```bash
+# Claude Code — works immediately after eval
+claude
+
+# Any agent — set env vars and run
+OPENAI_BASE_URL=http://127.0.0.1:8080/v1 codex
+```
+
+### 4. Check status and stop
+
+```bash
+dedroom status    # Show running state, PID, uptime, tokens saved
+dedroom stop      # Stop the daemon
+```
+
+### One-shot alternative (no daemon)
+
+```bash
+# Starts proxy, launches the agent, cleans up on exit
+dedroom wrap claude
+```
 
 ---
 
 ## Requirements
 
-- Python 3.9+ (for the `pip install dedroom` package and CLI)
-- Rust 1.85+ — only needed if you're building from source (see [Development](#development))
-- macOS, Linux, or Windows (WSL recommended on Windows)
+- Python 3.9+
+- macOS, Linux, or Windows (WSL)
 
 ---
 
@@ -85,15 +102,9 @@ That's it the proxy starts, routes all API traffic through the pipeline, and shu
 
 ### Bring your own provider
 
-DedrooM is **provider-agnostic** —> point it at any OpenAI-compatible API:
+DedrooM is **provider-agnostic** — point it at any OpenAI-compatible API:
 
 ```bash
-# OpenCode Zen (includes free models)
-dedroom wrap opencode \
-  --upstream-url https://opencode.ai/zen \
-  --api-key "sk-your-key" \
-  -- run -m dedroom/deepseek-v4-flash-free "your task"
-
 # DeepSeek
 dedroom wrap claude \
   --upstream-url https://api.deepseek.com \
@@ -109,24 +120,47 @@ dedroom wrap codex \
   --upstream-url http://localhost:11434/v1
 ```
 
-### Free models via OpenCode Zen
-
-When you wrap OpenCode with `--upstream-url https://opencode.ai/zen`, DedrooM automatically registers OpenCode Zen's current free-tier models in your OpenCode config, alongside standard premium models (Claude Opus 4.6, Sonnet 4.6, GPT-4o).
-
-> The specific free models and their names/limits are set by the OpenCode Zen provider, not DedrooM, and change over time check [opencode.ai/zen](https://opencode.ai/zen) for the current list before depending on a specific one.
-
 ---
 
 ## Commands
 
+### `dedroom init` —> Start the proxy daemon
+
+```bash
+dedroom init                           # Start daemon on port 8080
+dedroom init --port 9999               # Custom port
+dedroom init --no-daemon               # Run in foreground (CI/scripts)
+dedroom init --stop                    # Stop daemon
+```
+
+Starts the proxy as a background daemon with auto-restart. Prints the shell
+environment variables needed to route agents through the proxy. Add them to
+your shell profile or use `eval "$(dedroom init)"` for the current session.
+
+### `dedroom status` —> Show proxy status
+
+```bash
+dedroom status                         # Running state, PID, uptime, savings
+dedroom status --port 9999
+```
+
+Shows whether the proxy is running, its PID and uptime, compression and
+loop-detection savings, log file state, and self-healing stats.
+
+### `dedroom stop` —> Stop the daemon
+
+```bash
+dedroom stop                           # Stop daemon on port 8080
+dedroom stop --port 9999
+```
+
 ### `dedroom wrap <agent>` —> Start the proxy and launch an agent
 
 ```bash
-dedroom wrap claude                   # Default port 8080
+dedroom wrap claude                   # Port 8080
 dedroom wrap codex --port 9999        # Custom port
 dedroom wrap aider -- --model sonnet  # Pass args through to the agent
 dedroom wrap cursor                   # Prints GUI setup instructions
-dedroom wrap cline                    # Injects .clinerules + VS Code settings
 dedroom wrap opencode -- run -m ...   # Non-interactive mode
 ```
 
@@ -135,7 +169,7 @@ dedroom wrap opencode -- run -m ...   # Non-interactive mode
 ```bash
 dedroom unwrap codex     # Restores ~/.codex/config.toml from backup
 dedroom unwrap opencode  # Removes the DedrooM provider from opencode.json
-dedroom unwrap claude    # Runtime-only — nothing persisted to restore
+dedroom unwrap claude    # Runtime-only — nothing persisted
 ```
 
 ### `dedroom doctor` —> Run diagnostics
@@ -146,17 +180,17 @@ dedroom doctor --port 9999          # Check a specific port
 dedroom doctor --json               # Machine-readable output
 ```
 
-Verifies proxy liveness, agent routing configuration, shell environment variables, and token savings.
+Verifies proxy liveness, agent routing, shell env vars, and token savings.
 
-### `dedroom proxy` Run the proxy standalone
+### `dedroom proxy` —> Run the proxy standalone (foreground)
 
 ```bash
 dedroom proxy                         # Port 8080, default config
 dedroom proxy --port 9999             # Custom port
-dedroom proxy --config my-config.yaml # Custom config file
+dedroom proxy --config my-config.yaml
 ```
 
-### `dedroom dash` Terminal dashboard
+### `dedroom dash` —> Terminal dashboard
 
 ```bash
 dedroom dash                          # Auto-detects proxy on port 8080

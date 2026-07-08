@@ -1,6 +1,11 @@
 //! DedrooM CLI — wrap AI agents with loop detection and context compression.
 //!
 //! Usage:
+//!     dedroom init                          # Start proxy daemon + print shell exports
+//!     dedroom init --no-daemon              # Run proxy in foreground (CI/scripts)
+//!     dedroom init --stop                   # Stop proxy daemon
+//!     dedroom init --port 9999              # Custom port
+//!     dedroom init --connect-port 8081      # Custom CONNECT tunnel port
 //!     dedroom wrap claude                    # Start proxy + launch Claude Code
 //!     dedroom wrap claude --port 9999        # Custom proxy port
 //!     dedroom wrap claude --config config.yaml
@@ -16,6 +21,8 @@
 //!     dedroom wrap cline                     # Start proxy + print Cline config instructions
 //!     dedroom wrap cline --port 9999
 //!     dedroom unwrap codex                   # Restore Codex config from backup
+//!     dedroom status                         # Show proxy status and savings
+//!     dedroom status --port 9999
 //!     dedroom doctor                         # Run diagnostics
 //!     dedroom doctor --port 9999
 //!     dedroom doctor --json                  # JSON output
@@ -40,6 +47,8 @@ enum CliCommand {
         port: u16,
         config: PathBuf,
         agent_args: Vec<String>,
+        upstream_url: Option<String>,
+        api_key: Option<String>,
     },
     /// Undo wrap changes for an agent (restore configs, etc.).
     Unwrap {
@@ -56,6 +65,35 @@ enum CliCommand {
         port: u16,
         config: PathBuf,
     },
+    /// Initialize DedrooM as a background daemon and print shell exports.
+    Init {
+        port: u16,
+        connect_port: u16,
+        config: PathBuf,
+        upstream_url: Option<String>,
+        api_key: Option<String>,
+        no_daemon: bool,
+    },
+    /// Stop the DedrooM proxy daemon.
+    Stop {
+        port: u16,
+    },
+    /// Show proxy status: running state, PID, uptime, recent savings.
+    Status {
+        port: u16,
+    },
+    /// Generate a compression report.
+    Report {
+        port: u16,
+    },
+    /// Run an arbitrary command through the proxy.
+    Run {
+        port: u16,
+        connect_port: u16,
+        config: PathBuf,
+        cmd: String,
+        cmd_args: Vec<String>,
+    },
 }
 
 fn parse_args() -> Result<CliCommand> {
@@ -64,17 +102,28 @@ fn parse_args() -> Result<CliCommand> {
         eprintln!("Usage: dedroom <command> [options] [-- <agent-args>]");
         eprintln!();
         eprintln!("Commands:");
+        eprintln!("  init          Start proxy daemon + print shell exports (eval \"$(dedroom init)\")");
+        eprintln!("  init --no-daemon  Run proxy in foreground (CI/scripts)");
+        eprintln!("  status        Show proxy status, PID, uptime, savings");
+        eprintln!("  stop          Stop proxy daemon");
         eprintln!("  wrap <agent>  Start proxy + launch agent (e.g. claude, codex, aider, cursor, opencode, cline)");
         eprintln!("  unwrap <agent> Undo wrap changes (restore configs, etc.)");
         eprintln!("  doctor        Run diagnostics (proxy, routing, savings)");
         eprintln!("  proxy         Start standalone proxy server");
-        eprintln!("  proxy         Start standalone proxy server");
+        eprintln!("  run <cmd>     Run a command through the proxy, starting one if needed");
+        eprintln!("  report        Show per-tool compression report (from attribution data)");
         eprintln!();
         eprintln!("Options:");
         eprintln!("  --port <N>    Proxy port (default: 8080)");
+        eprintln!("  --connect-port <N>  CONNECT tunnel port (default: 8081)");
         eprintln!("  --config <P>  Config file path (default: dedroom.yaml)");
         eprintln!();
         eprintln!("Examples:");
+        eprintln!("  dedroom init");
+        eprintln!("  dedroom init --no-daemon");
+        eprintln!("  dedroom init --port 9999");
+        eprintln!("  dedroom status");
+        eprintln!("  dedroom stop");
         eprintln!("  dedroom wrap claude");
         eprintln!("  dedroom wrap claude --port 9999 -- --model opus");
         eprintln!("  dedroom wrap codex");
@@ -86,6 +135,7 @@ fn parse_args() -> Result<CliCommand> {
         eprintln!("  dedroom doctor");
         eprintln!("  dedroom doctor --port 9999 --json");
         eprintln!("  dedroom proxy --port 8080");
+        eprintln!("  dedroom run -- curl https://api.anthropic.com");
         std::process::exit(1);
     }
 
@@ -129,6 +179,8 @@ fn parse_args() -> Result<CliCommand> {
             let mut config = PathBuf::from("dedroom.yaml");
             let mut agent_args: Vec<String> = Vec::new();
             let mut passed_double_dash = false;
+            let mut upstream_url: Option<String> = None;
+            let mut api_key: Option<String> = None;
 
             while i < args.len() {
                 match args[i].as_str() {
@@ -142,6 +194,18 @@ fn parse_args() -> Result<CliCommand> {
                         i += 1;
                         if i < args.len() {
                             config = PathBuf::from(&args[i]);
+                        }
+                    }
+                    "--upstream-url" => {
+                        i += 1;
+                        if i < args.len() {
+                            upstream_url = Some(args[i].clone());
+                        }
+                    }
+                    "--api-key" => {
+                        i += 1;
+                        if i < args.len() {
+                            api_key = Some(args[i].clone());
                         }
                     }
                     "--" => {
@@ -163,6 +227,8 @@ fn parse_args() -> Result<CliCommand> {
                 port,
                 config,
                 agent_args,
+                upstream_url,
+                api_key,
             })
         }
         "doctor" => {
@@ -209,8 +275,169 @@ fn parse_args() -> Result<CliCommand> {
                 i += 1;
             }
             Ok(CliCommand::Proxy { port, config })
+        }            "init" | "start" => {
+            let mut port = 8080u16;
+            let mut connect_port = 8081u16;
+            let mut connect_port_explicit = false;
+            let mut config = PathBuf::from("dedroom.yaml");
+            let mut upstream_url: Option<String> = None;
+            let mut api_key: Option<String> = None;
+            let mut no_daemon = false;
+
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--port" => {
+                        i += 1;
+                        if i < args.len() {
+                            port = args[i].parse().context("--port must be a number")?;
+                        }
+                    }
+                    "--connect-port" => {
+                        i += 1;
+                        if i < args.len() {
+                            connect_port = args[i].parse().context("--connect-port must be a number")?;
+                            connect_port_explicit = true;
+                        }
+                    }
+                    "--config" => {
+                        i += 1;
+                        if i < args.len() {
+                            config = PathBuf::from(&args[i]);
+                        }
+                    }
+                    "--stop" | "--kill" => {
+                        // Redirect to Stop variant
+                        return Ok(CliCommand::Stop { port });
+                    }
+                    "--no-daemon" => {
+                        no_daemon = true;
+                    }
+                    "--upstream-url" => {
+                        i += 1;
+                        if i < args.len() {
+                            upstream_url = Some(args[i].clone());
+                        }
+                    }
+                    "--api-key" => {
+                        i += 1;
+                        if i < args.len() {
+                            api_key = Some(args[i].clone());
+                        }
+                    }
+                    _ => bail!("Unknown option: {}", args[i]),
+                }
+                i += 1;
+            }
+            if !connect_port_explicit {
+                connect_port = port + 1;
+            }
+            Ok(CliCommand::Init { port, connect_port, config, upstream_url, api_key, no_daemon })
         }
-        _ => bail!("Unknown command: {command}. Use: wrap | unwrap | proxy"),
+        "stop" | "deinit" | "kill" => {
+            let mut port = 8080u16;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--port" => {
+                        i += 1;
+                        if i < args.len() {
+                            port = args[i].parse().context("--port must be a number")?;
+                        }
+                    }
+                    _ => bail!("Unknown option: {}", args[i]),
+                }
+                i += 1;
+            }
+            Ok(CliCommand::Stop { port })
+        }
+        "status" => {
+            let mut port = 8080u16;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--port" => {
+                        i += 1;
+                        if i < args.len() {
+                            port = args[i].parse().context("--port must be a number")?;
+                        }
+                    }
+                    _ => bail!("Unknown option: {}", args[i]),
+                }
+                i += 1;
+            }
+            Ok(CliCommand::Status { port })
+        }
+        "report" | "compression-report" | "savings" => {
+            let mut port = 8080u16;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--port" => {
+                        i += 1;
+                        if i < args.len() {
+                            port = args[i].parse().context("--port must be a number")?;
+                        }
+                    }
+                    _ => bail!("Unknown option: {}", args[i]),
+                }
+                i += 1;
+            }
+            Ok(CliCommand::Report { port })
+        }
+        "run" => {
+            let mut port = 8080u16;
+            let mut connect_port = 8081u16;
+            let mut config = PathBuf::from("dedroom.yaml");
+            let mut passed_double_dash = false;
+            let mut cmd_parts: Vec<String> = Vec::new();
+            let mut connect_port_explicit = false;
+
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--port" => {
+                        i += 1;
+                        if i < args.len() {
+                            port = args[i].parse().context("--port must be a number")?;
+                        }
+                    }
+                    "--connect-port" => {
+                        i += 1;
+                        if i < args.len() {
+                            connect_port = args[i].parse().context("--connect-port must be a number")?;
+                            connect_port_explicit = true;
+                        }
+                    }
+                    "--config" => {
+                        i += 1;
+                        if i < args.len() {
+                            config = PathBuf::from(&args[i]);
+                        }
+                    }
+                    "--" => {
+                        passed_double_dash = true;
+                    }
+                    _ => {
+                        // After --, everything is the command
+                        // Before --, unknown options are errors
+                        if passed_double_dash {
+                            cmd_parts.push(args[i].clone());
+                        } else {
+                            // First positional argument starts the command
+                            cmd_parts.push(args[i].clone());
+                            passed_double_dash = true; // treat rest as command args
+                        }
+                    }
+                }
+                i += 1;
+            }
+
+            if !connect_port_explicit {
+                connect_port = port + 1;
+            }
+            if cmd_parts.is_empty() {
+                bail!("Usage: dedroom run -- <command> [args...]");
+            }
+            let cmd = cmd_parts.remove(0);
+            Ok(CliCommand::Run { port, connect_port, config, cmd, cmd_args: cmd_parts })
+        }
+        _ => bail!("Unknown command: {command}. Use: init | start | stop | deinit | status | wrap | unwrap | doctor | proxy | run"),
     }
 }
 
@@ -239,10 +466,8 @@ fn find_proxy_binary() -> Result<PathBuf> {
          Build it first: cargo build -p dedroom-proxy",
         candidate.display()
     );
-}
-
-/// Start the proxy as a background subprocess.
-fn start_proxy(port: u16, config: &Path) -> Result<std::process::Child> {
+}    /// Start the proxy as a background subprocess.
+fn start_proxy(port: u16, connect_port: u16, config: &Path, upstream_url: Option<&str>, api_key: Option<&str>) -> Result<std::process::Child> {
     let proxy_path = find_proxy_binary()?;
     let config_arg = if config.exists() {
         config.to_string_lossy().to_string()
@@ -252,13 +477,24 @@ fn start_proxy(port: u16, config: &Path) -> Result<std::process::Child> {
         config.to_string_lossy().to_string()
     };
 
-    eprintln!("  Starting DedrooM proxy on port {}...", port);
+    eprintln!("  Starting DedrooM proxy on port {} (CONNECT on {})...", port, connect_port);
 
-    let child = Command::new(&proxy_path)
-        .arg("--port")
+    let mut cmd = Command::new(&proxy_path);
+    cmd.arg("--port")
         .arg(port.to_string())
+        .arg("--connect-port")
+        .arg(connect_port.to_string())
         .arg("--config")
-        .arg(&config_arg)
+        .arg(&config_arg);
+
+    if let Some(url) = upstream_url {
+        cmd.arg("--upstream-url").arg(url);
+    }
+    if let Some(key) = api_key {
+        cmd.arg("--api-key").arg(key);
+    }
+
+    let child = cmd
         .stdout(Stdio::null()) // proxy logs go to its own stdout → hidden
         .stderr(Stdio::inherit()) // proxy errors visible
         .spawn()
@@ -270,6 +506,275 @@ fn start_proxy(port: u16, config: &Path) -> Result<std::process::Child> {
     Ok(child)
 }
 
+
+// ── Daemon management (init / deinit) ─────────────────────────────────────
+
+const PID_FILE: &str = "/tmp/dedroom.pid";
+const LOG_FILE: &str = "/tmp/dedroom.log";
+const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
+const LOG_BACKUPS: usize = 5;
+
+/// Detect the user's shell to print correct export syntax.
+fn detect_shell() -> &'static str {
+    #[cfg(windows)]
+    {
+        return "powershell";
+    }
+    #[cfg(not(windows))]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_default();
+        if shell.ends_with("fish") {
+            "fish"
+        } else if shell.ends_with("zsh") {
+            "zsh"
+        } else {
+            "bash"
+        }
+    }
+}
+
+/// Read PID from lock file (if exists and process is alive).
+fn read_pid_from_lock(port: u16) -> Option<u32> {
+    let lock_path = format!("/tmp/dedroom_{}.lock", port);
+    let content = std::fs::read_to_string(&lock_path).ok()?;
+    let pid: u32 = content.trim().parse().ok()?;
+    let alive = std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if alive { Some(pid) } else { None }
+}
+
+/// Read the PID from the legacy PID file (backward compat).
+fn read_legacy_pid_file() -> Option<u32> {
+    let content = std::fs::read_to_string(PID_FILE).ok()?;
+    let pid: u32 = content.trim().parse().ok()?;
+    let alive = std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if alive { Some(pid) } else { None }
+}
+
+// ── Log Rotation ───────────────────────────────────────────────────────────
+//
+// Rotate the log file when it exceeds LOG_MAX_BYTES. Keeps up to LOG_BACKUPS
+// historical files (dedroom.log.1 through dedroom.log.N).
+
+fn rotate_log_if_needed() {
+    let path = std::path::Path::new(LOG_FILE);
+    if !path.exists() {
+        return;
+    }
+    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if len < LOG_MAX_BYTES {
+        return;
+    }
+    // Shift backups: .N → .N+1, then .log → .log.1
+    for i in (1..LOG_BACKUPS).rev() {
+        let src = format!("{}.{}", LOG_FILE, i);
+        let dst = format!("{}.{}", LOG_FILE, i + 1);
+        let _ = std::fs::rename(&src, &dst);
+    }
+    let _ = std::fs::rename(LOG_FILE, format!("{}.1", LOG_FILE));
+}
+
+// ── Command builder ────────────────────────────────────────────────────────
+
+/// Build the proxy command arguments as a Vec<String> so they can be
+/// serialized and reused by the auto-restart monitor thread.
+fn build_proxy_args(
+    port: u16,
+    connect_port: u16,
+    config: &str,
+    upstream_url: Option<&str>,
+    api_key: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "--port".to_string(),
+        port.to_string(),
+        "--connect-port".to_string(),
+        connect_port.to_string(),
+        "--config".to_string(),
+        config.to_string(),
+    ];
+    if let Some(url) = upstream_url {
+        args.push("--upstream-url".to_string());
+        args.push(url.to_string());
+    }
+    if let Some(key) = api_key {
+        args.push("--api-key".to_string());
+        args.push(key.to_string());
+    }
+    args
+}
+
+/// Build the proxy command arguments with --supervised flag for the
+/// auto-restart daemon supervisor (PID lock + crash recovery).
+fn build_proxy_supervised_args(
+    port: u16,
+    connect_port: u16,
+    config: &str,
+    upstream_url: Option<&str>,
+    api_key: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "--port".to_string(),
+        port.to_string(),
+        "--connect-port".to_string(),
+        connect_port.to_string(),
+        "--config".to_string(),
+        config.to_string(),
+        "--supervised".to_string(),
+    ];
+    if let Some(url) = upstream_url {
+        args.push("--upstream-url".to_string());
+        args.push(url.to_string());
+    }
+    if let Some(key) = api_key {
+        args.push("--api-key".to_string());
+        args.push(key.to_string());
+    }
+    args
+}
+
+/// Spawn the proxy child process, redirecting output to the log file.
+fn spawn_proxy_child(proxy_path: &Path, args: &[String]) -> Result<std::process::Child> {
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(LOG_FILE)
+        .with_context(|| format!("Failed to open log file {}", LOG_FILE))?;
+    let log_clone = log_file.try_clone()
+        .context("Failed to clone log file handle")?;
+
+    let mut cmd = Command::new(proxy_path);
+    cmd.args(args)
+        .stdout(log_file)
+        .stderr(log_clone)
+        .stdin(Stdio::null())
+        .spawn()
+        .with_context(|| format!("Failed to start proxy at {}", proxy_path.display()))
+}
+
+/// Path for the port-specific stopping flag file.
+fn port_stopping_flag(port: u16) -> String {
+    format!("/tmp/dedroom_{}.stopping", port)
+}
+
+// ── Daemon lifecycle ───────────────────────────────────────────────────────
+
+/// Start the proxy as a background daemon process with auto-restart.
+///
+/// Spawns `dedroom-proxy --supervised` which acts as a process supervisor:
+/// it acquires the PID lock, spawns the actual proxy as a child, and
+/// monitors+restarts it on crash. The supervisor persists as a standalone
+/// process, so auto-restart works even after `dedroom init` returns.
+fn start_daemon_proxy(
+    port: u16,
+    config: &Path,
+    upstream_url: Option<&str>,
+    api_key: Option<&str>,
+    connect_port: u16,
+) -> Result<u32> {
+    let proxy_path = find_proxy_binary()?;
+    let config_arg = config.to_string_lossy().to_string();
+
+    // Rotate log if oversized
+    rotate_log_if_needed();
+
+    // Build args with --supervised flag so the proxy manages its own lifecycle
+    let args = build_proxy_supervised_args(port, connect_port, &config_arg, upstream_url, api_key);
+
+    // Spawn supervisor (manages PID lock + auto-restart internally)
+    let child = spawn_proxy_child(&proxy_path, &args)
+        .context("Failed to start supervised proxy daemon")?;
+
+    let pid = child.id();
+
+    eprintln!("  Proxy daemon started (PID {}) with auto-restart", pid);
+    Ok(pid)
+}
+
+/// Stop the proxy daemon.
+///
+/// Creates a stopping flag (so the monitor knows this is intentional),
+/// reads the PID from the lock file, and kills the process. Falls back
+/// to querying the health endpoint if no lock file exists.
+async fn stop_daemon_proxy(port: u16) -> Result<bool> {
+    let stopping_file = port_stopping_flag(port);
+
+    // Try lock file first
+    if let Some(pid) = read_pid_from_lock(port) {
+        eprintln!("  Stopping proxy daemon (PID {})...", pid);
+        // Signal intentional stop
+        std::fs::write(&stopping_file, "stopping").ok();
+        kill_process_by_id(pid, true);
+        // Wait for monitor to clean up
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Clean up any leftover files
+        std::fs::remove_file(&stopping_file).ok();
+        eprintln!("  Proxy daemon stopped.");
+        return Ok(true);
+    }
+
+    // Fallback: try legacy PID file
+    if let Some(pid) = read_legacy_pid_file() {
+        eprintln!("  Stopping proxy daemon (PID {})...", pid);
+        std::fs::write(&stopping_file, "stopping").ok();
+        kill_process_by_id(pid, true);
+        std::fs::remove_file(PID_FILE).ok();
+        std::fs::remove_file(&stopping_file).ok();
+        eprintln!("  Proxy daemon stopped.");
+        return Ok(true);
+    }
+
+    // Fallback: query health endpoint
+    if check_port(port) {
+        if let Some(pid) = query_proxy_pid(port).await {
+            eprintln!("  Stopping proxy (PID {})...", pid);
+            std::fs::write(&stopping_file, "stopping").ok();
+            kill_process_by_id(pid, true);
+            std::fs::remove_file(&stopping_file).ok();
+            eprintln!("  Proxy stopped.");
+            return Ok(true);
+        }
+    }
+
+    eprintln!("  No running proxy daemon found on port {}.", port);
+    Ok(false)
+}
+
+/// Poll the proxy /health endpoint (async).
+async fn poll_health_async(url: &str, max_attempts: u32, delay_ms: u64) -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .ok();
+
+    let client = match client {
+        Some(c) => c,
+        None => return false,
+    };
+
+    for _ in 0..max_attempts {
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => return true,
+            _ => tokio::time::sleep(Duration::from_millis(delay_ms)).await,
+        }
+    }
+    false
+}
 
 /// Poll the proxy /health endpoint until it responds.
 async fn wait_for_proxy(port: u16, timeout_secs: u64) -> Result<()> {
@@ -446,7 +951,7 @@ fn find_aider_binary() -> Result<PathBuf> {
 ///
 /// OpenCode uses OPENCODE_CONFIG_CONTENT env var to configure its providers.
 /// We inject a JSON payload that routes Anthropic, OpenAI, and the custom
-/// headroom provider through the proxy.
+/// dedroom provider through the proxy.
 fn launch_opencode(port: u16, extra_args: &[String]) -> Result<std::process::Child> {
     let opencode_binary = find_opencode_binary()?;
 
@@ -466,7 +971,7 @@ fn launch_opencode(port: u16, extra_args: &[String]) -> Result<std::process::Chi
             "openai": {
                 "options": { "baseURL": proxy_url_v1 }
             },
-            "headroom": {
+            "dedroom": {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "DedrooM Proxy",
                 "options": { "baseURL": proxy_url_v1 },
@@ -611,10 +1116,10 @@ fn inject_codex_provider_config(port: u16) -> Result<()> {
 
     let block = format!(
         r#"{top}
-model_provider = "headroom"
+model_provider = "dedroom"
 openai_base_url = "http://127.0.0.1:{port}/v1"
 
-[model_providers.headroom]
+[model_providers.dedroom]
 name = "OpenAI via DedrooM proxy"
 base_url = "http://127.0.0.1:{port}/v1"
 supports_websockets = true
@@ -631,7 +1136,7 @@ env_http_headers = {{ "X-Headroom-Project" = "DEDROOM_PROJECT" }}
     let content = if config_file.exists() {
         let existing = std::fs::read_to_string(&config_file)
             .context("Failed to read Codex config")?;
-        let cleaned = strip_codex_headroom_blocks(&existing);
+        let cleaned = strip_codex_dedroom_blocks(&existing);
         format!("{}\n\n{}", block, cleaned)
     } else {
         block
@@ -649,12 +1154,12 @@ fn restore_codex_provider_config() -> Result<(String, PathBuf)> {
         &config_file,
         &backup_file,
         |c| c.contains(CODEX_TOP_MARKER),
-        |c| Ok(Some(strip_codex_headroom_blocks(c))),
+        |c| Ok(Some(strip_codex_dedroom_blocks(c))),
     )
 }
 
 /// Remove DedrooM-managed marker blocks from Codex config content.
-fn strip_codex_headroom_blocks(content: &str) -> String {
+fn strip_codex_dedroom_blocks(content: &str) -> String {
     let mut result = content.to_string();
     while let Some(start) = result.find(CODEX_TOP_MARKER) {
         let after_start = &result[start + CODEX_TOP_MARKER.len()..];
@@ -678,29 +1183,60 @@ fn opencode_config_paths() -> (PathBuf, PathBuf) {
 }
 
 /// Inject a DedrooM provider into OpenCode's opencode.json config.
-fn inject_opencode_provider_config(port: u16) -> Result<()> {
+async fn fetch_dynamic_models(upstream_url: Option<&str>, api_key: Option<&str>) -> serde_json::Map<String, serde_json::Value> {
+    let mut default_models = serde_json::Map::new();
+    default_models.insert("claude-sonnet-4-6".into(), serde_json::json!({"name": "Claude Sonnet 4.6", "limit": {"context": 200000, "output": 16384}}));
+    default_models.insert("gpt-4o".into(), serde_json::json!({"name": "GPT-4o", "limit": {"context": 128000, "output": 16384}}));
+    default_models.insert("deepseek-v4-flash".into(), serde_json::json!({"name": "DeepSeek v4 Flash", "limit": {"context": 128000, "output": 16384}}));
+    default_models.insert("llama-3.3-70b-versatile".into(), serde_json::json!({"name": "Llama 3.3 70B", "limit": {"context": 128000, "output": 8192}}));
+
+    let Some(url) = upstream_url else { return default_models; };
+    let mut models_url = url.trim_end_matches('/').to_string();
+    if models_url.ends_with("/chat/completions") {
+        models_url = models_url.replace("/chat/completions", "/models");
+    } else if !models_url.ends_with("/models") {
+        models_url = format!("{}/models", models_url);
+    }
+    
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build().unwrap_or_default();
+    let mut req = client.get(&models_url);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+    
+    if let Ok(resp) = req.send().await {
+        if let Ok(json) = resp.json::<serde_json::Value>().await {
+            if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+                let mut fetched = serde_json::Map::new();
+                for item in data {
+                    if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
+                        fetched.insert(id.to_string(), serde_json::json!({
+                            "name": id,
+                            "limit": { "context": 128000, "output": 16384 }
+                        }));
+                    }
+                }
+                if !fetched.is_empty() {
+                    return fetched;
+                }
+            }
+        }
+    }
+    default_models
+}
+
+async fn inject_opencode_provider_config(port: u16, upstream_url: Option<&str>, api_key: Option<&str>) -> Result<()> {
     let (config_file, backup_file) = opencode_config_paths();
     snapshot_before_inject(&config_file, &backup_file)?;
 
+    let dynamic_models = fetch_dynamic_models(upstream_url, api_key).await;
+
     let proxy_url = format!("http://127.0.0.1:{}/v1", port);
-    let headroom_entry = serde_json::json!({
+    let dedroom_entry = serde_json::json!({
         "npm": "@ai-sdk/openai-compatible",
         "name": "DedrooM Proxy",
         "options": { "baseURL": proxy_url },
-        "models": {
-            "claude-sonnet-4-6": {
-                "name": "Claude Sonnet 4.6",
-                "limit": { "context": 200000, "output": 16384 }
-            },
-            "claude-opus-4-6": {
-                "name": "Claude Opus 4.6",
-                "limit": { "context": 200000, "output": 16384 }
-            },
-            "gpt-4o": {
-                "name": "GPT-4o",
-                "limit": { "context": 128000, "output": 16384 }
-            }
-        }
+        "models": dynamic_models
     });
 
     let content = if config_file.exists() {
@@ -709,14 +1245,14 @@ fn inject_opencode_provider_config(port: u16) -> Result<()> {
         let mut data: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(&existing).unwrap_or_default();
         if let Some(providers) = data.get_mut("provider").and_then(|p| p.as_object_mut()) {
-            providers.insert("headroom".to_string(), headroom_entry);
+            providers.insert("dedroom".to_string(), dedroom_entry);
         } else {
-            data.insert("provider".to_string(), serde_json::json!({ "headroom": headroom_entry }));
+            data.insert("provider".to_string(), serde_json::json!({ "dedroom": dedroom_entry }));
         }
         serde_json::to_string_pretty(&serde_json::Value::Object(data))?
     } else {
         serde_json::to_string_pretty(&serde_json::json!({
-            "provider": { "headroom": headroom_entry }
+            "provider": { "dedroom": dedroom_entry }
         }))?
     };
 
@@ -739,7 +1275,7 @@ fn restore_opencode_provider_config() -> Result<(String, PathBuf)> {
             };
             if let Some(obj) = data.as_object_mut() {
                 if let Some(providers) = obj.get_mut("provider").and_then(|p| p.as_object_mut()) {
-                    providers.remove("headroom");
+                    providers.remove("dedroom");
                     if providers.is_empty() {
                         obj.remove("provider");
                     }
@@ -767,24 +1303,17 @@ fn check_port(port: u16) -> bool {
 }
 
 /// Query the proxy /health endpoint to get its runtime config (including PID).
-fn query_proxy_pid(port: u16) -> Option<u32> {
+async fn query_proxy_pid(port: u16) -> Option<u32> {
     let url = format!("http://127.0.0.1:{}/health", port);
-    match reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
-        .ok()?
-        .get(&url)
-        .send()
-    {
-        Ok(resp) if resp.status().is_success() => {
-            let body: serde_json::Value = resp.json().ok()?;
-            body.get("config")
-                .and_then(|c| c.get("pid"))
-                .and_then(|p| p.as_u64())
-                .map(|p| p as u32)
-        }
-        _ => None,
-    }
+        .ok()?;
+    let body = fetch_json_async(&client, &url).await?;
+    body.get("config")
+        .and_then(|c| c.get("pid"))
+        .and_then(|p| p.as_u64())
+        .map(|p| p as u32)
 }
 
 // ── Proxy guard (RAII cleanup) ─────────────────────────────────────────────
@@ -813,9 +1342,13 @@ impl Drop for ProxyGuard {
 }
 
 /// Kill a process by PID and wait for it to stop (platform-aware).
+///
+/// Uses SIGINT (Ctrl+C) on Unix so processes with a `ctrlc` handler or
+/// `tokio::signal::ctrl_c()` can shut down gracefully.
 fn kill_process_by_id(pid: u32, wait: bool) {
     #[cfg(unix)]
     let _ = Command::new("kill")
+        .arg("-INT")
         .arg(pid.to_string())
         .spawn();
     #[cfg(windows)]
@@ -839,8 +1372,8 @@ struct WrapContext {
 
 impl WrapContext {
     /// Start the proxy, register a Ctrl+C handler, and wait for readiness.
-    async fn new(port: u16, config: &Path) -> Result<Self> {
-        let proxy = start_proxy(port, config)?;
+    async fn new(port: u16, config: &Path, upstream_url: Option<&str>, api_key: Option<&str>) -> Result<Self> {
+        let proxy = start_proxy(port, port + 1, config, upstream_url, api_key)?;
         let guard = ProxyGuard::new(proxy);
         let interrupted = Arc::new(AtomicBool::new(false));
 
@@ -879,7 +1412,7 @@ impl WrapContext {
 // Injected into .clinerules (or AGENTS.md) so the LLM uses rtk-prefixed
 // commands for token-efficient tool calls.
 
-const RTK_INSTRUCTIONS_BLOCK: &str = r#"<!-- headroom:rtk-instructions -->
+const RTK_INSTRUCTIONS_BLOCK: &str = r#"<!-- dedroom:rtk-instructions -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
 
 When running shell commands, **always prefix with `rtk`**. This reduces context
@@ -920,14 +1453,14 @@ rtk pip list            rtk pnpm install        rtk npm run <script>
 - In command chains, prefix each segment: `rtk git add . && rtk git commit -m "msg"`
 - For debugging, use raw command without rtk prefix
 - `rtk proxy <cmd>` runs command without filtering but tracks usage
-<!-- /headroom:rtk-instructions -->
+<!-- /dedroom:rtk-instructions -->
 "#;
 
 // ── Wrap implementations ────────────────────────────────────────────────────
 
 /// Run Claude Code through the DedrooM proxy.
-async fn wrap_claude(port: u16, config: &Path, agent_args: &[String]) -> Result<()> {
-    let ctx = WrapContext::new(port, config).await?;
+async fn wrap_claude(port: u16, config: &Path, agent_args: &[String], upstream_url: Option<&str>, api_key: Option<&str>) -> Result<()> {
+    let ctx = WrapContext::new(port, config, upstream_url, api_key).await?;
     let mut agent = launch_claude(port, agent_args).context("Failed to launch Claude Code")?;
     ctx.wait_for_agent(&mut agent, "Claude Code").await
 }
@@ -936,10 +1469,10 @@ async fn wrap_claude(port: u16, config: &Path, agent_args: &[String]) -> Result<
 ///
 /// Injects a Headroom provider into ~/.codex/config.toml so both API-key
 /// and subscription (ChatGPT) users route through the proxy.
-async fn wrap_codex(port: u16, config: &Path, agent_args: &[String]) -> Result<()> {
+async fn wrap_codex(port: u16, config: &Path, agent_args: &[String], upstream_url: Option<&str>, api_key: Option<&str>) -> Result<()> {
     eprintln!("  Wrapping Codex CLI via DedrooM proxy on port {}...", port);
     inject_codex_provider_config(port)?;
-    let ctx = WrapContext::new(port, config).await?;
+    let ctx = WrapContext::new(port, config, upstream_url, api_key).await?;
     let mut agent = match launch_codex(port, agent_args) {
         Ok(c) => c,
         Err(e) => { restore_codex_provider_config().ok(); return Err(e); }
@@ -950,8 +1483,8 @@ async fn wrap_codex(port: u16, config: &Path, agent_args: &[String]) -> Result<(
 }
 
 /// Run aider through the DedrooM proxy.
-async fn wrap_aider(port: u16, config: &Path, agent_args: &[String]) -> Result<()> {
-    let ctx = WrapContext::new(port, config).await?;
+async fn wrap_aider(port: u16, config: &Path, agent_args: &[String], upstream_url: Option<&str>, api_key: Option<&str>) -> Result<()> {
+    let ctx = WrapContext::new(port, config, upstream_url, api_key).await?;
     let mut agent = launch_aider(port, agent_args).context("Failed to launch aider")?;
     ctx.wait_for_agent(&mut agent, "aider").await
 }
@@ -1045,13 +1578,98 @@ fn launch_cursor_app() -> Result<()> {
     }
 }
 
+/// Run an arbitrary command through the DedrooM proxy.
+///
+/// Starts the proxy if not already running, injects env vars
+/// (ANTHROPIC_BASE_URL, OPENAI_BASE_URL, etc.), spawns the command,
+/// and stops the proxy when the command exits (only if we started it).
+async fn run_command(
+    port: u16,
+    connect_port: u16,
+    config: &Path,
+    cmd: &str,
+    cmd_args: &[String],
+) -> Result<()> {
+    let started_proxy = !check_port(port);
+
+    if started_proxy {
+        eprintln!("  Starting DedrooM proxy on port {}...", port);
+        let mut proxy_child = start_proxy(port, connect_port, config, None, None)?;
+        wait_for_proxy(port, 30).await?;
+
+        // Run command with proxy env vars
+        let proxy_url = format!("http://127.0.0.1:{}", port);
+        let proxy_url_v1 = format!("http://127.0.0.1:{}/v1", port);
+
+        eprintln!("  Running: {} {}\n", cmd, cmd_args.join(" "));
+
+        let mut child = Command::new(cmd)
+            .args(cmd_args)
+            .env("ANTHROPIC_BASE_URL", &proxy_url)
+            .env("OPENAI_BASE_URL", &proxy_url_v1)
+            .env("OPENAI_API_BASE", &proxy_url_v1)
+            .env("HTTPS_PROXY", format!("http://127.0.0.1:{}", connect_port))
+            .env("HTTP_PROXY", format!("http://127.0.0.1:{}", connect_port))
+            .env("NO_PROXY", "localhost,127.0.0.1")
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .with_context(|| format!("Failed to run command: {}", cmd))?;
+
+        let status = child.wait().context("Failed to wait for command")?;
+
+        // Stop proxy after command finishes
+        eprintln!("\n  Command finished. Stopping proxy...");
+        kill_process_by_id(proxy_child.id(), true);
+        proxy_child.wait().ok();
+
+        if !status.success() {
+            if let Some(code) = status.code() {
+                bail!("Command exited with code {}", code);
+            }
+        }
+    } else {
+        // Proxy already running — just inject env vars
+        let proxy_url = format!("http://127.0.0.1:{}", port);
+        let proxy_url_v1 = format!("http://127.0.0.1:{}/v1", port);
+
+        eprintln!("  Using existing proxy on port {}", port);
+        eprintln!("  Running: {} {}\n", cmd, cmd_args.join(" "));
+
+        let mut child = Command::new(cmd)
+            .args(cmd_args)
+            .env("ANTHROPIC_BASE_URL", &proxy_url)
+            .env("OPENAI_BASE_URL", &proxy_url_v1)
+            .env("OPENAI_API_BASE", &proxy_url_v1)
+            .env("HTTPS_PROXY", format!("http://127.0.0.1:{}", connect_port))
+            .env("HTTP_PROXY", format!("http://127.0.0.1:{}", connect_port))
+            .env("NO_PROXY", "localhost,127.0.0.1")
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .with_context(|| format!("Failed to run command: {}", cmd))?;
+
+        let status = child.wait().context("Failed to wait for command")?;
+
+        if !status.success() {
+            if let Some(code) = status.code() {
+                bail!("Command exited with code {}", code);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Run Cursor through the DedrooM proxy.
 ///
 /// Auto-detects Cursor installation, injects proxy settings into
 /// ~/.cursor/settings.json, and launches Cursor if possible.
 /// Falls back to printing setup instructions.
-async fn wrap_cursor(port: u16, config: &Path) -> Result<()> {
-    let ctx = WrapContext::new(port, config).await?;
+async fn wrap_cursor(port: u16, config: &Path, upstream_url: Option<&str>, api_key: Option<&str>) -> Result<()> {
+    let ctx = WrapContext::new(port, config, upstream_url, api_key).await?;
     let openai_url = format!("http://127.0.0.1:{}/v1", port);
     let anthropic_url = format!("http://127.0.0.1:{}", port);
 
@@ -1100,10 +1718,10 @@ async fn wrap_cursor(port: u16, config: &Path) -> Result<()> {
 }
 
 /// Run OpenCode through the DedrooM proxy.
-async fn wrap_opencode(port: u16, config: &Path, agent_args: &[String]) -> Result<()> {
+async fn wrap_opencode(port: u16, config: &Path, agent_args: &[String], upstream_url: Option<&str>, api_key: Option<&str>) -> Result<()> {
     eprintln!("  Wrapping OpenCode via DedrooM proxy on port {}...", port);
-    inject_opencode_provider_config(port)?;
-    let ctx = WrapContext::new(port, config).await?;
+    inject_opencode_provider_config(port, upstream_url, api_key).await?;
+    let ctx = WrapContext::new(port, config, upstream_url, api_key).await?;
     let mut agent = match launch_opencode(port, agent_args) {
         Ok(c) => c,
         Err(e) => { restore_opencode_provider_config().ok(); return Err(e); }
@@ -1216,14 +1834,14 @@ fn inject_cline_settings(port: u16) -> Result<()> {
 /// Injects RTK guidance into .clinerules, auto-detects VS Code/Cline,
 /// injects proxy settings into VS Code settings.json, and launches VS Code.
 /// Falls back to printing setup instructions.
-async fn wrap_cline(port: u16, config: &Path) -> Result<()> {
-    let ctx = WrapContext::new(port, config).await?;
+async fn wrap_cline(port: u16, config: &Path, upstream_url: Option<&str>, api_key: Option<&str>) -> Result<()> {
+    let ctx = WrapContext::new(port, config, upstream_url, api_key).await?;
 
     // Inject RTK instructions into .clinerules (always, even without Cline)
     if let Some(path) = std::env::current_dir().ok().map(|d| d.join(".clinerules")) {
         if path.exists() {
             let existing = std::fs::read_to_string(&path).unwrap_or_default();
-            if !existing.contains("<!-- headroom:rtk-instructions -->") {
+            if !existing.contains("<!-- dedroom:rtk-instructions -->") {
                 std::fs::write(&path, format!("{}\n\n{}", existing.trim(), RTK_INSTRUCTIONS_BLOCK)).ok();
             }
         } else {
@@ -1295,7 +1913,7 @@ async fn wrap_cline(port: u16, config: &Path) -> Result<()> {
     ctx.block_until_ctrlc().await
 }
 
-/// Undo wrap changes for a given agent, matching headroom's behaviour exactly.
+/// Undo wrap changes for a given agent, matching dedroom's behaviour exactly.
 ///
 /// * Codex: restores ~/.codex/config.toml from backup or strips markers.
 /// * Claude: runtime-only env vars — no persistent state to undo.
@@ -1376,13 +1994,17 @@ async fn unwrap_agent(agent: &str, port: u16) -> Result<()> {
     // Stop any running proxy
     eprintln!();
     if check_port(port) {
-        if let Some(pid) = query_proxy_pid(port) {
+        if let Some(pid) = query_proxy_pid(port).await {
             kill_process_by_id(pid, false);
             // Wait for port to free up (up to 5 seconds)
-            let freed = (0..50).any(|_| {
-                std::thread::sleep(Duration::from_millis(100));
-                !check_port(port)
-            });
+            let mut freed = false;
+            for _ in 0..50 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if !check_port(port) {
+                    freed = true;
+                    break;
+                }
+            }
             if freed {
                 eprintln!("  Stopped local DedrooM proxy on port {}.", port);
             } else {
@@ -1574,7 +2196,7 @@ fn check_codex_routing(port: u16) -> CheckResult {
         }
     };
 
-    if !text.contains("[model_providers.headroom]") {
+    if !text.contains("[model_providers.dedroom]") {
         return CheckResult {
             name,
             status: WARN.to_string(),
@@ -1659,7 +2281,7 @@ fn check_opencode_routing(port: u16) -> CheckResult {
 
     if let Some(base_url) = data
         .get("provider")
-        .and_then(|p| p.get("headroom"))
+        .and_then(|p| p.get("dedroom"))
         .and_then(|h| h.get("options"))
         .and_then(|o| o.get("baseURL"))
         .and_then(|v| v.as_str())
@@ -1706,7 +2328,7 @@ fn check_cline_routing() -> CheckResult {
     match clinerules {
         Some(path) if path.exists() => {
             match std::fs::read_to_string(&path) {
-                Ok(content) if content.contains("<!-- headroom:rtk-instructions -->") => {
+                Ok(content) if content.contains("<!-- dedroom:rtk-instructions -->") => {
                     CheckResult {
                         name,
                         status: PASS.to_string(),
@@ -1920,45 +2542,31 @@ fn render_doctor(checks: &[CheckResult], port: u16, version: &str) {
 ///
 /// Probes the proxy health endpoint, checks agent routing configs, shell env,
 /// and savings flow. Returns exit code: 0 = all pass, 1 = warnings, 2 = failure.
-fn doctor(port: u16, emit_json: bool) -> Result<i32> {
+async fn doctor(port: u16, emit_json: bool) -> Result<i32> {
     let base_url = format!("http://127.0.0.1:{}", port);
 
-    // Build a single reqwest client for all probe requests
-    let client = reqwest::blocking::Client::builder()
+    // Build a single reqwest async client for all probe requests
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .ok();
 
     // Fetch health and stats with the shared client
-    let health = client.as_ref().and_then(|client| {
-        client
-            .get(format!("{}/health", base_url))
-            .send()
-            .ok()
-            .and_then(|r| {
-                if r.status().is_success() {
-                    r.json::<serde_json::Value>().ok()
-                } else {
-                    None
-                }
-            })
-    });
+    let health = match &client {
+        Some(c) => {
+            let url = format!("{}/health", base_url);
+            fetch_json_async(c, &url).await
+        }
+        None => None,
+    };
 
-    let stats = health.as_ref().and_then(|_| {
-        client.as_ref().and_then(|client| {
-            client
-                .get(format!("{}/admin/stats", base_url))
-                .send()
-                .ok()
-                .and_then(|r| {
-                    if r.status().is_success() {
-                        r.json::<serde_json::Value>().ok()
-                    } else {
-                        None
-                    }
-                })
-        })
-    });
+    let stats = match (health.as_ref(), &client) {
+        (Some(_), Some(c)) => {
+            let url = format!("{}/admin/stats", base_url);
+            fetch_json_async(c, &url).await
+        }
+        _ => None,
+    };
 
     let installed_version = option_env!("CARGO_PKG_VERSION").unwrap_or("0.1.0");
 
@@ -2013,6 +2621,289 @@ fn doctor(port: u16, emit_json: bool) -> Result<i32> {
     }
 
     Ok(exit_code)
+}
+
+// ── Status command ─────────────────────────────────────────────────────────
+//
+// DedrooM Status shows a concise summary of the proxy's current state:
+//  - Is it running? PID?
+//  - Uptime
+//  - Savings (from /admin/stats)
+//  - Port info
+
+/// Format a duration in seconds to a human-readable string.
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
+    }
+}
+
+/// Fetch JSON from a URL using an async reqwest client.
+async fn fetch_json_async(client: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
+    let resp = client.get(url).send().await.ok()?;
+    if resp.status().is_success() {
+        resp.json::<serde_json::Value>().await.ok()
+    } else {
+        None
+    }
+}
+
+/// Show proxy status: running state, PID, uptime, and recent savings.
+async fn status(port: u16, connect_port: u16) -> Result<i32> {
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    // Check PID lock file (preferred) or legacy PID file
+    let pid_from_file = read_pid_from_lock(port).or_else(|| read_legacy_pid_file());
+
+    // Try health endpoint (async)
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok();
+
+    let health = match &client {
+        Some(c) => {
+            let url = format!("{}/health", base_url);
+            fetch_json_async(c, &url).await
+        }
+        None => None,
+    };
+
+    // Try stats endpoint (async)
+    let stats = match (health.as_ref(), &client) {
+        (Some(_), Some(c)) => {
+            let url = format!("{}/admin/stats", base_url);
+            fetch_json_async(c, &url).await
+        }
+        _ => None,
+    };
+
+    // Try learning endpoint for self-healing stats (async)
+    let learning = match (health.as_ref(), &client) {
+        (Some(_), Some(c)) => {
+            let url = format!("{}/admin/learning", base_url);
+            fetch_json_async(c, &url).await
+        }
+        _ => None,
+    };
+
+    let is_port_open = check_port(port);
+
+    // ── Determine the actual PID ──
+    let pid = pid_from_file.or_else(|| {
+        health.as_ref().and_then(|h| {
+            h.get("config")
+                .and_then(|c| c.get("pid"))
+                .and_then(|p| p.as_u64())
+                .map(|p| p as u32)
+        })
+    });
+
+    let version = option_env!("CARGO_PKG_VERSION").unwrap_or("0.1.0");
+
+    eprintln!();
+    eprintln!("  ╔═════════════════════════════════════════════════╗");
+    eprintln!("  ║         DEDROOM STATUS                        ║");
+    eprintln!("  ╚═════════════════════════════════════════════════╝");
+    eprintln!();
+
+    if health.is_some() {
+        eprintln!("  Status:      {} RUNNING", "●".to_string());
+    } else if is_port_open {
+        eprintln!("  Status:      {} PORT OPEN (not responding)", "○".to_string());
+    } else {
+        eprintln!("  Status:      {} STOPPED", "○".to_string());
+    }
+
+    eprintln!("  Version:     v{}", version);
+    eprintln!("  Port:        {} (HTTP API)  {} (CONNECT tunnel)", port, connect_port);
+
+    // PID
+    if let Some(p) = pid {
+        eprintln!("  PID:         {}", p);
+    } else if is_port_open {
+        eprintln!("  PID:         unknown (port in use)");
+    } else {
+        eprintln!("  PID:         —");
+    }
+
+    // Uptime
+    if let Some(h) = health.as_ref() {
+        let uptime = h
+            .get("uptime_seconds")
+            .and_then(|u| u.as_u64())
+            .unwrap_or(0);
+        eprintln!("  Uptime:      {}", format_duration(uptime));
+    } else {
+        eprintln!("  Uptime:      —");
+    }
+
+    // Log file
+    let log_exists = std::path::Path::new(LOG_FILE).exists();
+    eprintln!("  Log file:    {} ({})", LOG_FILE, if log_exists { "exists" } else { "—" });
+
+    // Savings
+    if let Some(s) = stats {
+        let savings = s.get("savings");
+        let compression = savings
+            .and_then(|sv| sv.get("total_compression_savings_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let loop_savings = savings
+            .and_then(|sv| sv.get("total_loop_savings_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let blocked = savings
+            .and_then(|sv| sv.get("total_calls_blocked"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let total_tokens = compression + loop_savings;
+        let dollars = (total_tokens as f64 / 1000.0) * 0.015;
+        let time_saved = (total_tokens as f64 * 20.0) / 1000.0;
+
+        eprintln!();
+        eprintln!("  ── Savings ────────────────────────────────────");
+        eprintln!();
+        eprintln!("  Total tokens saved:  {:>12}", total_tokens);
+        eprintln!("    Compression:       {:>12}", compression);
+        eprintln!("    Loop detection:    {:>12}", loop_savings);
+        eprintln!("  Calls blocked:       {:>12}", blocked);
+        eprintln!("  Est. cost savings:  {:>12}", format!("${:.4}", dollars));
+        eprintln!("  Est. time saved:    {:>12}", format!("{:.1}s", time_saved));
+    }
+
+    // Self-healing stats
+    if let Some(l) = learning {
+        if let Some(stats) = l.get("stats") {
+            let attempts = stats.get("total_attempts").and_then(|v| v.as_u64()).unwrap_or(0);
+            let successes = stats.get("total_successes").and_then(|v| v.as_u64()).unwrap_or(0);
+            let rate = stats.get("success_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if attempts > 0 {
+                eprintln!();
+                eprintln!("  ── Self-Healing ────────────────────────────────");
+                eprintln!();
+                eprintln!("  Mutation attempts: {:>6}", attempts);
+                eprintln!("  Successful:        {:>6}", successes);
+                eprintln!("  Success rate:      {:>5.1}%", rate * 100.0);
+                if let Some(by_tool) = stats.get("by_tool").and_then(|v| v.as_array()) {
+                    for tool in by_tool.iter().filter_map(|t| {
+                        let name = t.get("tool_name").and_then(|v| v.as_str())?;
+                        let ta = t.get("total_attempts").and_then(|v| v.as_u64())?;
+                        let ts = t.get("successes").and_then(|v| v.as_u64())?;
+                        Some((name, ta, ts))
+                    }) {
+                        let pct = if tool.1 > 0 { tool.2 as f64 / tool.1 as f64 * 100.0 } else { 0.0 };
+                        eprintln!("    {:<20} {:>3}/{:>3} ({:>4.0}%)", tool.0, tool.2, tool.1, pct);
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!();
+    eprintln!("  ── Files ────────────────────────────────────────");
+    eprintln!();
+    if pid_from_file.is_some() {
+        eprintln!("  PID file:    {} (valid)", PID_FILE);
+    } else if std::path::Path::new(PID_FILE).exists() {
+        eprintln!("  PID file:    {} (stale)", PID_FILE);
+    } else {
+        eprintln!("  PID file:    {} (absent)", PID_FILE);
+    }
+
+    eprintln!();
+
+    let exit_code: i32 = if health.is_some() { 0 } else { 1 };
+    Ok(exit_code)
+}
+
+// ── Report command ──────────────────────────────────────────────────────────
+
+async fn report(port: u16) -> Result<i32> {
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok();
+
+    // Fetch health for uptime, attribution for report data
+    let health = match &client {
+        Some(c) => fetch_json_async(c, &format!("{}/health", base_url)).await,
+        None => None,
+    };
+
+    let att = match (health.as_ref(), &client) {
+        (Some(_), Some(c)) => {
+            let url = format!("{}/admin/attribution", base_url);
+            fetch_json_async(c, &url).await
+        }
+        _ => None,
+    };
+
+    if att.is_none() {
+        eprintln!("  Proxy not running on port {}", port);
+        return Ok(1);
+    }
+
+    let a = att.unwrap();
+
+    let total_tokens_processed = a.get("total_tokens_processed").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total_tokens_saved = a.get("total_tokens_saved").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total_calls = a.get("total_calls").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total_compression = a.get("total_compression_savings").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total_loop = a.get("total_loop_savings").and_then(|v| v.as_u64()).unwrap_or(0);
+    let blocked_calls = a.get("blocked_calls").and_then(|v| v.as_u64()).unwrap_or(0);
+    let error_calls = a.get("error_calls").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cache_hits = a.get("cache_hits").and_then(|v| v.as_u64()).unwrap_or(0);
+    let savings_ratio = a.get("savings_ratio").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let estimated_cost_saved = a.get("estimated_cost_saved_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let uptime = health.and_then(|h| h.get("uptime_seconds").and_then(|u| u.as_u64())).unwrap_or(0);
+
+    eprintln!();
+    eprintln!("  ── Compression Report ────────────────────────────");
+    eprintln!();
+    eprintln!("  Uptime:              {}", format_duration(uptime));
+    eprintln!("  Calls processed:     {:>12}", total_calls);
+    eprintln!("  Calls blocked:       {:>12}", blocked_calls);
+    eprintln!("  Error calls:         {:>12}", error_calls);
+    eprintln!("  Cache hits:          {:>12}", cache_hits);
+    eprintln!("  Tokens processed:    {:>12}", total_tokens_processed);
+    eprintln!("  Tokens saved:        {:>12}  ({:.1}%)", total_tokens_saved, savings_ratio * 100.0);
+    eprintln!("    Compression:       {:>12}", total_compression);
+    eprintln!("    Loop detection:    {:>12}", total_loop);
+    eprintln!("  Est. cost saved:     {:>12}", format!("${:.4}", estimated_cost_saved));
+
+    if let Some(tools) = a.get("per_tool").and_then(|v| v.as_array()) {
+        if !tools.is_empty() {
+            eprintln!();
+            eprintln!("  By tool:");
+            eprintln!("  {:<22} {:>6} {:>12} {:>12} {:>8} {:>8}", "Tool", "Calls", "Processed", "Saved", "Ratio", "Blocked");
+            eprintln!("  {}", "-".repeat(72));
+            for tool in tools {
+                let name = tool.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
+                let calls = tool.get("call_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let processed = tool.get("tokens_processed").and_then(|v| v.as_u64()).unwrap_or(0);
+                let saved = tool.get("tokens_saved").and_then(|v| v.as_u64()).unwrap_or(0);
+                let ratio = tool.get("compression_ratio").and_then(|v| v.as_f64());
+                let blocked = tool.get("blocked_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let ratio_str = match ratio {
+                    Some(r) if r > 0.0 => format!("{:>6.1}%", r * 100.0),
+                    _ => "   —  ".to_string(),
+                };
+                eprintln!("  {:<22} {:>6} {:>12} {:>12} {:>8} {:>8}", name, calls, processed, saved, ratio_str, blocked);
+            }
+        }
+    }
+
+    eprintln!();
+    Ok(0)
 }
 
 fn capitalize(s: &str) -> String {
@@ -2077,14 +2968,18 @@ async fn main() -> Result<()> {
             port,
             config,
             agent_args,
+            upstream_url,
+            api_key,
         } => {
+            let u = upstream_url.as_deref();
+            let k = api_key.as_deref();
             match agent.as_str() {
-                "claude" => wrap_claude(port, &config, &agent_args).await?,
-                "codex" => wrap_codex(port, &config, &agent_args).await?,
-                "aider" => wrap_aider(port, &config, &agent_args).await?,
-                "cursor" => wrap_cursor(port, &config).await?,
-                "opencode" => wrap_opencode(port, &config, &agent_args).await?,
-                "cline" => wrap_cline(port, &config).await?,
+                "claude" => wrap_claude(port, &config, &agent_args, u, k).await?,
+                "codex" => wrap_codex(port, &config, &agent_args, u, k).await?,
+                "aider" => wrap_aider(port, &config, &agent_args, u, k).await?,
+                "cursor" => wrap_cursor(port, &config, u, k).await?,
+                "opencode" => wrap_opencode(port, &config, &agent_args, u, k).await?,
+                "cline" => wrap_cline(port, &config, u, k).await?,
                 other => bail!("Unsupported agent: {}. Supported: claude, codex, aider, cursor, opencode, cline", other),
             }
             Ok(())
@@ -2094,7 +2989,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         CliCommand::Doctor { port, emit_json } => {
-            let exit_code = doctor(port, emit_json)?;
+            let exit_code = doctor(port, emit_json).await?;
             std::process::exit(exit_code);
         }
         CliCommand::Proxy { port, config } => {
@@ -2117,6 +3012,151 @@ async fn main() -> Result<()> {
             if !status.success() && let Some(code) = status.code() {
                 bail!("Proxy exited with code {}", code);
             }
+            Ok(())
+        }
+        CliCommand::Init { port, connect_port, config, upstream_url, api_key, no_daemon } => {
+            let shell = detect_shell();
+
+            // Build the export lines based on shell
+            let export_lines: Vec<String> = if shell == "fish" {
+                vec![
+                    format!("set -x ANTHROPIC_BASE_URL http://127.0.0.1:{}", port),
+                    format!("set -x OPENAI_BASE_URL http://127.0.0.1:{}/v1", port),
+                    format!("set -x OPENAI_API_BASE http://127.0.0.1:{}/v1", port),
+                    format!("# HTTPS_PROXY catches agents that ignore the above (e.g. OpenCode Zen)"),
+                    format!("set -x HTTPS_PROXY http://127.0.0.1:{}", connect_port),
+                    format!("set -x HTTP_PROXY http://127.0.0.1:{}", connect_port),
+                    "set -x NO_PROXY localhost,127.0.0.1".into(),
+                ]
+            } else {
+                vec![
+                    format!("export ANTHROPIC_BASE_URL=http://127.0.0.1:{}", port),
+                    format!("export OPENAI_BASE_URL=http://127.0.0.1:{}/v1", port),
+                    format!("export OPENAI_API_BASE=http://127.0.0.1:{}/v1", port),
+                    "# HTTPS_PROXY catches agents that ignore the above (e.g. OpenCode Zen)".into(),
+                    format!("export HTTPS_PROXY=http://127.0.0.1:{}", connect_port),
+                    format!("export HTTP_PROXY=http://127.0.0.1:{}", connect_port),
+                    "export NO_PROXY=localhost,127.0.0.1".into(),
+                ]
+            };
+
+            let profile_hint = match shell {
+                "fish" => "~/.config/fish/config.fish",
+                "zsh" => "~/.zshrc",
+                "bash" => "~/.bashrc",
+                _ => "~/.bashrc",
+            };
+
+            if no_daemon {
+                // Run proxy in foreground (for CI/scripts)
+                eprintln!("  Running proxy in foreground (--no-daemon)...");
+                let proxy_path = find_proxy_binary()?;
+                let config_arg = config.to_string_lossy().to_string();
+
+                let mut cmd = std::process::Command::new(&proxy_path);
+                cmd.arg("--port")
+                    .arg(port.to_string())
+                    .arg("--connect-port")
+                    .arg(connect_port.to_string())
+                    .arg("--config")
+                    .arg(&config_arg)
+                    .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit());
+
+                if let Some(url) = upstream_url.as_deref() {
+                    cmd.arg("--upstream-url").arg(url);
+                }
+                if let Some(key) = api_key.as_deref() {
+                    cmd.arg("--api-key").arg(key);
+                }
+
+                let status = cmd.status()
+                    .context("Failed to start proxy")?;
+
+                if !status.success() && let Some(code) = status.code() {
+                    bail!("Proxy exited with code {}", code);
+                }
+
+                eprintln!();
+                eprintln!("  ╔═════════════════════════════════════════════════╗");
+                eprintln!("  ║         DEDROOM INIT                           ║");
+                eprintln!("  ╚═════════════════════════════════════════════════╝");
+                eprintln!();
+
+                for line in &export_lines {
+                    println!("{}", line);
+                }
+                eprintln!();
+                eprintln!("  Add these exports to {} to persist across sessions.", profile_hint);
+
+                return Ok(());
+            }
+
+            // Daemon mode (default)
+            let (pid, _already_running) = if let Some(pid) = read_pid_from_lock(port).or_else(|| read_legacy_pid_file()) {
+                eprintln!("  Proxy already running (PID {}) on port {}.", pid, port);
+                (pid, true)
+            } else {
+                let u = upstream_url.as_deref();
+                let k = api_key.as_deref();
+                let pid = start_daemon_proxy(port, &config, u, k, connect_port)?;
+
+                // Poll /health endpoint until ready
+                let health_url = format!("http://127.0.0.1:{}/health", port);
+                let ready = poll_health_async(&health_url, 10, 500).await;
+                if !ready {
+                    eprintln!("  [WARN] Proxy not ready after 5 seconds. Check {} for errors.", LOG_FILE);
+                }
+                (pid, false)
+            };
+
+            eprintln!();
+            eprintln!("  ╔═════════════════════════════════════════════════╗");
+            eprintln!("  ║         DEDROOM INIT                           ║");
+            eprintln!("  ╚═════════════════════════════════════════════════╝");
+            eprintln!();
+            eprintln!("  Proxy running on http://127.0.0.1:{} (CONNECT: {}) — PID {}", port, connect_port, pid);
+            eprintln!();
+            eprintln!("  Set these env vars to route AI agents through DedrooM:");
+            eprintln!();
+
+            for line in &export_lines {
+                println!("{}", line);
+            }
+
+            eprintln!();
+            eprintln!("  Quick eval:   eval \"$(dedroom init)\"");
+            eprintln!("  Profile:      add the exports above to {}", profile_hint);
+            eprintln!("  Stop daemon:  dedroom stop");
+            eprintln!("  Logs:         {}", LOG_FILE);
+            eprintln!();
+
+            Ok(())
+        }
+        CliCommand::Status { port } => {
+            let connect_port = port + 1;
+            let exit_code = status(port, connect_port).await?;
+            std::process::exit(exit_code);
+        }
+        CliCommand::Report { port } => {
+            let exit_code = report(port).await?;
+            std::process::exit(exit_code);
+        }
+        CliCommand::Stop { port } => {
+            stop_daemon_proxy(port).await?;
+            eprintln!();
+            eprintln!("  To unset proxy env vars in this shell:");
+            eprintln!("    unset ANTHROPIC_BASE_URL");
+            eprintln!("    unset OPENAI_BASE_URL");
+            eprintln!("    unset OPENAI_API_BASE");
+            eprintln!("    unset HTTPS_PROXY");
+            eprintln!("    unset HTTP_PROXY");
+            eprintln!("    unset NO_PROXY");
+            Ok(())
+        }
+        CliCommand::Run { port, connect_port, config, cmd, cmd_args } => {
+            run_command(port, connect_port, &config, &cmd, &cmd_args).await?;
             Ok(())
         }
 

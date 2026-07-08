@@ -54,6 +54,8 @@ pub struct AppState {
     pub default_pipeline: Arc<Mutex<Pipeline>>,
     /// Background NDJSON event logger.
     pub event_log: EventLog,
+    /// Monotonic timestamp when the proxy started (std::time::Instant).
+    pub startup_instant: std::time::Instant,
 }
 
 impl AppState {
@@ -76,6 +78,7 @@ impl AppState {
             proxy_config: Arc::new(RwLock::new(proxy_config)),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             event_log,
+            startup_instant: std::time::Instant::now(),
         }
     }
 
@@ -142,6 +145,8 @@ impl ProxyRouter {
             .route("/admin/events/stream", get(handlers::events_stream))
             .route("/admin/runtime-env", post(handlers::runtime_env))
             .route("/admin/attribution", get(handlers::attribution))
+            .route("/admin/learning", get(handlers::learning))
+            .route("/admin/instincts", get(handlers::instincts))
             .layer(Extension(self.state.clone()))
     }
 }

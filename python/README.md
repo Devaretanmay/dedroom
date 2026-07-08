@@ -19,32 +19,44 @@ DedrooM sits between your AI agent and the LLM provider to:
 
 ```bash
 pip install dedroom
+
+# Start the proxy daemon and route your agent through it
+dedroom init
+eval "$(dedroom init)"       # Sets ANTHROPIC_BASE_URL and OPENAI_BASE_URL
+
+# Use your agent as normal
+claude          # now routed through DedrooM
+codex           # works immediately
+
+# Check status and stop
+dedroom status  # Show running state, PID, uptime, tokens saved
+dedroom stop    # Stop the daemon
+```
+
+### One-shot alternative (no daemon)
+
+```bash
+dedroom wrap claude   # Starts proxy, launches agent, cleans up on exit
 ```
 
 ---
 
 ## Commands
 
-### Wrap any AI agent through the proxy
-
-```bash
-dedroom wrap claude          # Claude Code (Anthropic)
-dedroom wrap codex           # OpenAI Codex CLI
-dedroom wrap aider           # Aider
-dedroom wrap cursor          # Cursor Editor
-dedroom wrap cline           # Cline (VS Code extension)
-dedroom wrap opencode        # OpenCode
-```
+| Command | Description |
+|---|---|
+| `init` | Start proxy daemon and print shell exports |
+| `status` | Show proxy status, PID, uptime, savings |
+| `stop` | Stop the daemon |
+| `wrap <agent>` | Start proxy + launch agent |
+| `unwrap <agent>` | Restore config to pre-wrap state |
+| `doctor` | Run health checks |
+| `report` | Show per-tool compression report |
+| `proxy` | Start standalone proxy server |
 
 ### Use any LLM provider (not just OpenAI/Anthropic)
 
 ```bash
-# OpenCode Zen free models
-dedroom wrap opencode \
-  --upstream-url https://opencode.ai/zen \
-  --api-key "sk-your-key" \
-  -- run -m dedroom/deepseek-v4-flash-free "your task"
-
 # DeepSeek API
 dedroom wrap claude \
   --upstream-url https://api.deepseek.com \
@@ -53,16 +65,6 @@ dedroom wrap claude \
 # Local Ollama
 dedroom wrap aider \
   --upstream-url http://localhost:11434/v1
-```
-
-### Diagnostics & control
-
-```bash
-dedroom doctor                # Run health checks
-dedroom doctor --json         # JSON output for scripting
-dedroom proxy                 # Start standalone proxy
-dedroom unwrap <agent>        # Restore config to pre-wrap state
-dedroom dash                  # Launch TUI dashboard
 ```
 
 ---

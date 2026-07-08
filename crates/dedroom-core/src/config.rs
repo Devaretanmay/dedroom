@@ -12,7 +12,7 @@ pub struct DedrooMConfig {
     pub loop_compression_coupling: LoopCompressionCoupling,
     #[serde(default = "default_security")]
     pub security: SecurityConfig,
-    #[serde(default = "default_healing")]
+    #[serde(default)]
     pub self_healing: SelfHealingConfig,
 }
 
@@ -45,7 +45,7 @@ impl Default for DedrooMConfig {
                 redaction_enabled: true, context_detection: true,
                 audit_log: true, custom_patterns: Vec::new(),
             },
-            self_healing: default_healing(),
+            self_healing: SelfHealingConfig::default(),
         }
     }
 }
@@ -65,8 +65,7 @@ pub struct LoopDetectionConfig {
     pub count_mode: CountMode,
     #[serde(default = "default_adaptive")]
     pub adaptive: AdaptiveConfig,
-    #[serde(default = "default_volatile_fields")]
-    pub volatile_fields: VolatileFieldConfig,
+
     #[serde(default)]
     pub tools: Vec<ToolOverride>,
     #[serde(default)]
@@ -82,7 +81,6 @@ impl Default for LoopDetectionConfig {
             enabled: true, max_repeats: 3, history_window: None,
             strictness: Strictness::Balanced, count_mode: CountMode::All,
             adaptive: default_adaptive(),
-            volatile_fields: default_volatile_fields(),
             tools: Vec::new(), rules: Vec::new(),
             history_backend: "memory".into(), history_path: None,
         }
@@ -102,18 +100,6 @@ pub struct AdaptiveConfig {
     pub error_reduction: u32,
     #[serde(default = "default_min_repeats")]
     pub min_repeats: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VolatileFieldConfig {
-    #[serde(default)]
-    pub configured: Vec<ConfiguredVolatileField>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfiguredVolatileField {
-    pub tool: String,
-    pub fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,11 +250,19 @@ pub struct SelfHealingConfig {
     pub enabled: bool,
     #[serde(default)]
     pub mode: HealingMode,
-    /// Backend for healing memory: "memory" (default) or "sqlite".
-    #[serde(default = "default_memory_backend")]
-    pub memory_backend: String,
-    /// Path to SQLite database for healing memory (only used when `memory_backend` is "sqlite").
-    pub memory_path: Option<String>,
+    /// Instincts configuration (in-memory config rules).
+    #[serde(default)]
+    pub instincts: crate::healing::instincts::InstinctsConfig,
+}
+
+impl Default for SelfHealingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: HealingMode::Balanced,
+            instincts: crate::healing::instincts::InstinctsConfig::default(),
+        }
+    }
 }
 
 // ── Default helpers ────────────────────────────────────────────────────────
@@ -282,12 +276,8 @@ fn default_history_backend() -> String { "memory".into() }
 fn default_ccr_backend() -> String { "memory".into() }
 fn default_ccr_ttl() -> u64 { 1800 }
 
-
 fn default_adaptive() -> AdaptiveConfig {
     AdaptiveConfig { enabled: true, error_reduction: 1, min_repeats: 2 }
-}
-fn default_volatile_fields() -> VolatileFieldConfig {
-    VolatileFieldConfig { configured: Vec::new() }
 }
 fn default_compressors() -> CompressorsConfig {
     CompressorsConfig { smart_crusher: true, code_compressor: true, log_compressor: true, text_compressor: false }
@@ -310,9 +300,4 @@ fn default_coupling() -> LoopCompressionCoupling {
 }
 fn default_security() -> SecurityConfig {
     SecurityConfig { redaction_enabled: true, context_detection: true, audit_log: true, custom_patterns: Vec::new() }
-}
-fn default_memory_backend() -> String { "memory".into() }
-
-fn default_healing() -> SelfHealingConfig {
-    SelfHealingConfig { enabled: true, mode: HealingMode::Balanced, memory_backend: "memory".into(), memory_path: None }
 }

@@ -28,3 +28,13 @@ Thumbs.db
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Aider
+.aider*
+
+# Virtual envs
+.venv/
+
+# Demo / test assets
+audit_demo.gif
+mock_llm.py

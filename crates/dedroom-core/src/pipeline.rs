@@ -8,13 +8,13 @@ use crate::loop_detection::{LoopDetector, LoopVerdict, LoopStateSummary};
 use crate::compression::{ContentRouter, CompressionResult, ContentType};
 use crate::compression::policy::{LoopState, determine_level, should_inject_hint, hint_template, retention_for_level};
 use crate::compression::smart_crusher::{compress_json_array, compress_slice};
-use crate::compression::code_compressor::compress_code;
+use crate::compression::code_compressor::{compress_code, detect_language};
 use crate::compression::log_compressor::compress_logs;
 use crate::compression::text_compressor::compress_text;
 use crate::ccr::{CcrStore, hash_tool_call};
 use crate::telemetry::SavingsLedger;
 use crate::security::RedactionEngine;
-use crate::healing::{self, SelfHealingEngine, HealingContext};
+use crate::healing::{self, SelfHealingEngine, HealingContext, instincts::InstinctsEngine};
 use serde_json::Value;
 
 /// A tool call intercepted by the pipeline.
@@ -88,25 +88,17 @@ impl Pipeline {
             ccr_store: ccr,
             savings_ledger: SavingsLedger::new(),
             redaction_engine: RedactionEngine::new(redaction_config),
-            healing_engine: SelfHealingEngine::new(config.self_healing.clone(), Self::create_healing_memory(&config)),
+            healing_engine: Self::create_healing_engine(&config),
         }
     }
 
-    fn create_healing_memory(config: &DedrooMConfig) -> healing::memory::HealingMemory {
-        #[cfg(feature = "sqlite")]
-        if config.self_healing.memory_backend == "sqlite" {
-            let path = config.self_healing.memory_path.as_deref().unwrap_or("healing_memory.db");
-            match healing::memory::SqliteHealingMemory::new(path) {
-                Ok(sqlite) => {
-                    tracing::info!("Healing memory using SQLite backend: {path}");
-                    return healing::memory::HealingMemory::new(std::sync::Arc::new(sqlite));
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to open SQLite healing memory at {path}: {e}. Falling back to in-memory.");
-                }
-            }
-        }
-        healing::memory::HealingMemory::new_in_memory()
+    fn create_healing_engine(config: &DedrooMConfig) -> SelfHealingEngine {
+        let instincts = InstinctsEngine::from_config(&config.self_healing.instincts);
+        SelfHealingEngine::new(
+            config.self_healing.clone(),
+            healing::memory::HealingMemory::new(),
+            instincts,
+        )
     }
 
     fn create_ccr_store(config: &DedrooMConfig) -> CcrStore {
@@ -160,6 +152,7 @@ impl Pipeline {
                 &tool.name,
                 &tool.args,
                 tool.is_error,
+                tool.result.clone(),
                 summary.tool_counts.get(&tool.name).copied().unwrap_or(0) as u32,
                 summary.tilt_index,
                 summary.total_calls,
@@ -259,7 +252,7 @@ impl Pipeline {
                 }
             },
             ContentType::JsonObject => Some(content.to_string()),
-            ContentType::Code => Some(if self.config.compression.compressors.code_compressor { compress_code(content, "auto") } else { content.to_string() }),
+            ContentType::Code => Some(if self.config.compression.compressors.code_compressor { compress_code(content, detect_language(content)) } else { content.to_string() }),
             ContentType::Log => Some(if self.config.compression.compressors.log_compressor { compress_logs(content) } else { content.to_string() }),
             ContentType::Text => Some(if self.config.compression.compressors.text_compressor { compress_text(content) } else { content.to_string() }),
             _ => Some(content.to_string()),

@@ -14,37 +14,17 @@ pub enum LoopState {
     Recovering,
 }
 
-/// How aggressively to compress content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompressionLevel {
-    Normal,
-    Moderate,
-    Aggressive,
-    Maximum,
-}
-
-impl From<CompressionBudget> for CompressionLevel {
-    fn from(budget: CompressionBudget) -> Self {
-        match budget {
-            CompressionBudget::Normal => Self::Normal,
-            CompressionBudget::Moderate => Self::Moderate,
-            CompressionBudget::Aggressive => Self::Aggressive,
-            CompressionBudget::Maximum => Self::Maximum,
-        }
-    }
-}
-
 // ── Pure functions ─────────────────────────────────────────────────────────
 
-pub fn determine_level(state: LoopState, coupling: &LoopCompressionCoupling) -> CompressionLevel {
+pub fn determine_level(state: LoopState, coupling: &LoopCompressionCoupling) -> CompressionBudget {
     if !coupling.enabled {
-        return CompressionLevel::Normal;
+        return CompressionBudget::Normal;
     }
     match state {
-        LoopState::None => CompressionLevel::Normal,
-        LoopState::Detected => coupling.on_detected.compression_budget.into(),
-        LoopState::ErrorLoop => coupling.on_error_loop.compression_budget.into(),
-        LoopState::Recovering => coupling.on_recovery.compression_budget.into(),
+        LoopState::None => CompressionBudget::Normal,
+        LoopState::Detected => coupling.on_detected.compression_budget,
+        LoopState::ErrorLoop => coupling.on_error_loop.compression_budget,
+        LoopState::Recovering => coupling.on_recovery.compression_budget,
     }
 }
 
@@ -68,12 +48,12 @@ pub fn fresh_context_window(coupling: &LoopCompressionCoupling) -> usize {
     coupling.on_recovery.fresh_context_window
 }
 
-pub fn retention_for_level(level: CompressionLevel) -> f64 {
-    match level {
-        CompressionLevel::Normal => 0.3,
-        CompressionLevel::Moderate => 0.2,
-        CompressionLevel::Aggressive => 0.1,
-        CompressionLevel::Maximum => 0.05,
+pub fn retention_for_level(budget: CompressionBudget) -> f64 {
+    match budget {
+        CompressionBudget::Normal => 0.3,
+        CompressionBudget::Moderate => 0.2,
+        CompressionBudget::Aggressive => 0.1,
+        CompressionBudget::Maximum => 0.05,
     }
 }
 
@@ -91,17 +71,17 @@ mod tests {
         LoopCompressionCoupling {
             enabled: true,
             on_detected: crate::config::LoopCouplingAction {
-                compression_budget: crate::config::CompressionBudget::Aggressive,
+                compression_budget: CompressionBudget::Aggressive,
                 inject_hint: false,
                 hint_template: None,
             },
             on_error_loop: crate::config::LoopCouplingAction {
-                compression_budget: crate::config::CompressionBudget::Maximum,
+                compression_budget: CompressionBudget::Maximum,
                 inject_hint: true,
                 hint_template: Some("You are looping on '{tool}'. Try a completely different approach.".into()),
             },
             on_recovery: crate::config::RecoveryCouplingAction {
-                compression_budget: crate::config::CompressionBudget::Moderate,
+                compression_budget: CompressionBudget::Moderate,
                 fresh_context_window: 3,
             },
         }
@@ -110,7 +90,7 @@ mod tests {
     #[test]
     fn test_normal_state_returns_normal_level() {
         let coupling = default_coupling();
-        assert_eq!(determine_level(LoopState::None, &coupling), CompressionLevel::Normal);
+        assert_eq!(determine_level(LoopState::None, &coupling), CompressionBudget::Normal);
         assert!(!should_inject_hint(LoopState::None, &coupling));
         assert!(!skip_identical_content(LoopState::None));
     }
@@ -118,26 +98,26 @@ mod tests {
     #[test]
     fn test_detected_triggers_aggressive() {
         let coupling = default_coupling();
-        assert_eq!(determine_level(LoopState::Detected, &coupling), CompressionLevel::Aggressive);
+        assert_eq!(determine_level(LoopState::Detected, &coupling), CompressionBudget::Aggressive);
     }
 
     #[test]
     fn test_error_loop_triggers_maximum() {
         let coupling = default_coupling();
-        assert_eq!(determine_level(LoopState::ErrorLoop, &coupling), CompressionLevel::Maximum);
+        assert_eq!(determine_level(LoopState::ErrorLoop, &coupling), CompressionBudget::Maximum);
     }
 
     #[test]
     fn test_recovery_is_moderate() {
         let coupling = default_coupling();
-        assert_eq!(determine_level(LoopState::Recovering, &coupling), CompressionLevel::Moderate);
+        assert_eq!(determine_level(LoopState::Recovering, &coupling), CompressionBudget::Moderate);
     }
 
     #[test]
     fn test_disabled_coupling_returns_normal() {
         let mut coupling = default_coupling();
         coupling.enabled = false;
-        assert_eq!(determine_level(LoopState::ErrorLoop, &coupling), CompressionLevel::Normal);
+        assert_eq!(determine_level(LoopState::ErrorLoop, &coupling), CompressionBudget::Normal);
     }
 
     #[test]
@@ -148,15 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compression_level_from_budget() {
-        let lv: CompressionLevel = CompressionBudget::Normal.into();
-        assert_eq!(lv, CompressionLevel::Normal);
-        let lv: CompressionLevel = CompressionBudget::Maximum.into();
-        assert_eq!(lv, CompressionLevel::Maximum);
-    }
-
-    #[test]
     fn test_retention_for_level() {
-        assert!(retention_for_level(CompressionLevel::Normal) > retention_for_level(CompressionLevel::Aggressive));
+        assert!(retention_for_level(CompressionBudget::Normal) > retention_for_level(CompressionBudget::Aggressive));
     }
 }

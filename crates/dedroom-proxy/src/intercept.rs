@@ -25,10 +25,12 @@ pub enum Provider {
 /// A tool invocation extracted from the request messages.
 #[derive(Debug, Clone)]
 pub struct ExtractedTool {
+    pub id: Option<String>,
     pub name: String,
     pub args: String,
     pub result: Option<String>,
     pub is_error: bool,
+    #[allow(dead_code)]
     pub agent_thought: Option<String>,
 }
 
@@ -44,6 +46,10 @@ pub fn extract_tool_calls_openai(body: &Value) -> Vec<ExtractedTool> {
             if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
                 let assistant_content = msg.get("content").and_then(|c| c.as_str()).map(|s| s.to_string());
                 for tc in tool_calls {
+                    let id = tc
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .map(|s| s.to_string());
                     let name = tc
                         .get("function")
                         .and_then(|f| f.get("name"))
@@ -57,6 +63,7 @@ pub fn extract_tool_calls_openai(body: &Value) -> Vec<ExtractedTool> {
                         .unwrap_or("{}")
                         .to_string();
                     tools.push(ExtractedTool {
+                        id,
                         name,
                         args,
                         result: None,
@@ -68,11 +75,11 @@ pub fn extract_tool_calls_openai(body: &Value) -> Vec<ExtractedTool> {
 
             // Tool result messages contain the actual output
             if msg.get("role").and_then(|r| r.as_str()) == Some("tool") {
-                let name = msg
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
+                let tool_call_id = msg
+                    .get("tool_call_id")
+                    .and_then(|id| id.as_str())
+                    .map(|s| s.to_string());
+                
                 let content = msg
                     .get("content")
                     .and_then(|c| c.as_str())
@@ -81,8 +88,20 @@ pub fn extract_tool_calls_openai(body: &Value) -> Vec<ExtractedTool> {
                     .get("is_error")
                     .and_then(|e| e.as_bool())
                     .unwrap_or(false);
-                // Match by position: pair with the most recent unmatched tool
-                if let Some(tool) = tools.iter_mut().rev().find(|t| t.name == name && t.result.is_none()) {
+                
+                // Match by tool_call_id first, fallback to positional matching (first unmatched tool)
+                let matched_tool = if let Some(ref id) = tool_call_id {
+                    tools.iter_mut().find(|t| t.id.as_ref() == Some(id) && t.result.is_none())
+                } else {
+                    None
+                };
+                
+                let tool_to_update = match matched_tool {
+                    Some(t) => Some(t),
+                    None => tools.iter_mut().find(|t| t.result.is_none())
+                };
+
+                if let Some(tool) = tool_to_update {
                     tool.result = Some(content.to_string());
                     tool.is_error = is_error;
                 }
@@ -129,7 +148,7 @@ pub fn extract_tool_calls_anthropic(body: &Value) -> Vec<ExtractedTool> {
                                 .get("input")
                                 .map(|i| i.to_string())
                                 .unwrap_or_else(|| "{}".to_string());
-                            tools.push(ExtractedTool {
+                            tools.push(ExtractedTool { id: None,
                                 name,
                                 args,
                                 result: None,
@@ -621,7 +640,7 @@ mod tests {
         // With max_repeats=3 and errors, calls 3+ should be blocked.
 
         let tools: Vec<ExtractedTool> = (0..4)
-            .map(|_| ExtractedTool {
+            .map(|_| ExtractedTool { id: None,
                 name: "write_file".into(),
                 args: r#"{"path":"/tmp/test.txt"}"#.into(),
                 result: Some("error: permission denied".into()),
@@ -750,7 +769,7 @@ mod tests {
         let mut pipeline = Pipeline::new(config);
 
         // ── Request 1-3: Same tool loops until blocked ──────────────────
-        let looping_tool = ExtractedTool {
+        let looping_tool = ExtractedTool { id: None,
             name: "list_files".into(),
             args: r#"{"path":"/"}"#.into(),
             result: Some("error: permission denied".into()),
@@ -789,7 +808,7 @@ mod tests {
         assert_eq!(pipeline.healing_engine.total_attempts(), 0);
 
         // ── Request 4: Tool comes back with DIFFERENT args (agent adapted) ──
-        let adapted_tool = ExtractedTool {
+        let adapted_tool = ExtractedTool { id: None,
             name: "list_files".into(),
             args: r#"{"path":"/tmp","pattern":"*.txt"}"#.into(),
             result: Some("found 3 matching files".into()),
@@ -840,7 +859,7 @@ mod tests {
         let mut pipeline = Pipeline::new(config);
 
         // ── Calls 1-3: Same tool loops until blocked ────────────────────
-        let tool = ExtractedTool {
+        let tool = ExtractedTool { id: None,
             name: "search".into(),
             args: r#"{"query":"test"}"#.into(),
             result: Some("some result".into()),
@@ -849,7 +868,7 @@ mod tests {
         };
 
         // Call 1: allowed
-        let (allowed, blocked) = process_tools_through_pipeline(
+        let (allowed, _blocked) = process_tools_through_pipeline(
             &mut pipeline,
             vec![tool.clone()],
             None, None, None, false,
@@ -857,7 +876,7 @@ mod tests {
         assert_eq!(allowed.len(), 1);
 
         // Call 2: allowed
-        let (allowed, blocked) = process_tools_through_pipeline(
+        let (allowed, _blocked) = process_tools_through_pipeline(
             &mut pipeline,
             vec![tool.clone()],
             None, None, None, false,
@@ -908,7 +927,7 @@ mod tests {
         let mut pipeline = Pipeline::new(config);
 
         let tools: Vec<ExtractedTool> = (0..4)
-            .map(|_| ExtractedTool {
+            .map(|_| ExtractedTool { id: None,
                 name: "read_file".into(),
                 args: r#"{"path":"/tmp/secret.txt"}"#.into(),
                 result: Some("access denied".into()),

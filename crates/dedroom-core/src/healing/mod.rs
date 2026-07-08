@@ -11,9 +11,11 @@
 
 pub mod mutations;
 pub mod memory;
+pub mod instincts;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use crate::ccr::hash_tool_call;
 use crate::config::SelfHealingConfig;
 
 /// A healing context built from the current pipeline state.
@@ -22,6 +24,8 @@ pub struct HealingContext {
     pub tool_name: String,
     pub tool_args: String,
     pub is_error: bool,
+    /// The actual error result text (e.g. "permission denied"), if available.
+    pub error_result: Option<String>,
     pub repeat_count: u32,
     pub tilt_index: f64,
     pub session_tool_count: usize,
@@ -32,6 +36,7 @@ impl HealingContext {
         tool_name: &str,
         tool_args: &str,
         is_error: bool,
+        error_result: Option<String>,
         repeat_count: u32,
         tilt_index: f64,
         session_tool_count: usize,
@@ -40,6 +45,7 @@ impl HealingContext {
             tool_name: tool_name.to_string(),
             tool_args: tool_args.to_string(),
             is_error,
+            error_result,
             repeat_count,
             tilt_index,
             session_tool_count,
@@ -48,10 +54,17 @@ impl HealingContext {
 }
 
 /// The self-healing engine orchestrates mutation generation and scoring.
+///
+/// Three-tier priority:
+/// 1. [`instincts::InstinctsEngine`] — config-loaded rules (highest authority)
+/// 2. [`memory::HealingMemory`] — per-tool strategy tracking with args_hash matching
+/// 3. Fresh mutation candidates
 #[derive(Debug)]
 pub struct SelfHealingEngine {
     config: SelfHealingConfig,
     pub memory: memory::HealingMemory,
+    /// Instincts engine — config-loaded rules checked first.
+    pub instincts: instincts::InstinctsEngine,
     /// Pending outcomes from `generate_hint` that need to be evaluated
     /// on the next request to determine if the mutation broke the loop.
     /// Maps tool_name → strategy_label.
@@ -59,18 +72,27 @@ pub struct SelfHealingEngine {
 }
 
 impl SelfHealingEngine {
-    /// Create a new self-healing engine with the given config and memory backend.
-    pub fn new(config: SelfHealingConfig, memory: memory::HealingMemory) -> Self {
+    /// Create a new self-healing engine.
+    pub fn new(
+        config: SelfHealingConfig,
+        memory: memory::HealingMemory,
+        instincts: instincts::InstinctsEngine,
+    ) -> Self {
         Self {
             config,
             memory,
+            instincts,
             pending_outcome: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Create a new self-healing engine with a default in-memory backend.
+    /// Create a new self-healing engine with default in-memory backend and instincts.
     pub fn new_in_memory(config: SelfHealingConfig) -> Self {
-        Self::new(config, memory::HealingMemory::new_in_memory())
+        Self::new(
+            config,
+            memory::HealingMemory::new(),
+            instincts::InstinctsEngine::default(),
+        )
     }
 
     /// Generate a healing hint for a loop that was just detected.
@@ -94,17 +116,54 @@ impl SelfHealingEngine {
             session_tool_count: context.session_tool_count,
         };
 
-        // Check memory for past successful strategies first
-        let memory_strategy = self.memory.best_strategy(&context.tool_name);
+        // Step 1: Check instincts FIRST (config-loaded rules, highest authority)
+        if let Some(hint) = self.instincts.check_instincts(
+            &context.tool_name,
+            &context.tool_args,
+            context.is_error,
+            context.repeat_count,
+        ) {
+            if let Ok(mut store) = self.pending_outcome.lock() {
+                store.insert(context.tool_name.clone(), "instinct".to_string());
+            }
+            return Some(hint);
+        }
 
-        // Generate fresh mutation candidates
+        // Step 2: Check healing memory for past successful strategies (with args_hash matching)
+        let args_hash = hash_tool_call(&context.tool_name, &context.tool_args).to_hex().to_string();
+        let error_sig = if context.is_error { context.error_result.as_deref() } else { None };
+        let memory_suggestion = self.memory.suggest_strategy(
+            &context.tool_name,
+            Some(&args_hash),
+            error_sig,
+        );
+
+        // Step 3: Generate fresh mutation candidates
         let best = mutations::pick_best(&mutations_ctx);
 
-        // Prefer remembered strategy if confidence is high enough,
-        // otherwise use the freshly generated best
+        // Use memory suggestion if confidence is high enough
+        if let Some((ref strategy, confidence)) = memory_suggestion {
+            if confidence >= 0.6 {
+                let hint = format!(
+                    "{} [learned from past sessions] {}",
+                    match self.config.mode {
+                        crate::config::HealingMode::Conservative => "Consider: ",
+                        crate::config::HealingMode::Balanced => "Adapting strategy — ",
+                        crate::config::HealingMode::Aggressive => "",
+                    },
+                    strategy,
+                );
+                if let Ok(mut store) = self.pending_outcome.lock() {
+                    store.insert(context.tool_name.clone(), strategy.clone());
+                }
+                return Some(hint);
+            }
+        }
+
+        // Prefer remembered strategy if high confidence, otherwise fresh mutation
+        let memory_strategy = self.memory.best_strategy(&context.tool_name);
         let mutation = match (memory_strategy, best) {
             (Some((ref label, rate)), Some(ref m)) if rate > 0.7 && m.strategy != label => {
-                // Remembered strategy has better track record — use it
                 mutations::generate_all(&mutations_ctx)
                     .into_iter()
                     .find(|m| m.strategy == label.as_str())
@@ -112,7 +171,6 @@ impl SelfHealingEngine {
             }
             (_, Some(m)) => Some(m),
             (Some((ref label, _)), None) => {
-                // No fresh candidates but have memory — build generic hint
                 Some(mutations::Mutation {
                     strategy: "remembered",
                     suggestion: format!(
@@ -127,8 +185,6 @@ impl SelfHealingEngine {
         };
 
         let result = mutation.map(|m| {
-            // Store the strategy so the proxy handler can evaluate
-            // the outcome on the next request
             if let Ok(mut store) = self.pending_outcome.lock() {
                 store.insert(context.tool_name.clone(), m.strategy.to_string());
             }
@@ -142,9 +198,14 @@ impl SelfHealingEngine {
         result
     }
 
+    /// Get a reference to the instincts engine.
+    pub fn instincts_engine(&self) -> &instincts::InstinctsEngine {
+        &self.instincts
+    }
+
     /// Report a mutation outcome back to the memory store.
     pub fn report_outcome(&self, tool: &str, strategy: &str, success: bool) {
-        self.memory.record(tool, strategy, success);
+        self.memory.record_simple(tool, strategy, success);
     }
 
     /// The number of successful recoveries.
@@ -174,35 +235,39 @@ mod tests {
     use super::*;
     use crate::config::HealingMode;
 
-    fn engine() -> SelfHealingEngine {
-        SelfHealingEngine::new_in_memory(SelfHealingConfig {
+    fn default_config() -> SelfHealingConfig {
+        SelfHealingConfig {
             enabled: true,
             mode: HealingMode::Balanced,
-            memory_backend: "memory".into(),
-            memory_path: None,
-        })
+            ..Default::default()
+        }
+    }
+
+    fn engine() -> SelfHealingEngine {
+        SelfHealingEngine::new_in_memory(default_config())
     }
 
     fn disabled_engine() -> SelfHealingEngine {
         SelfHealingEngine::new_in_memory(SelfHealingConfig {
             enabled: false,
-            mode: HealingMode::Conservative,
-            memory_backend: "memory".into(),
-            memory_path: None,
+            ..Default::default()
         })
     }
 
     #[test]
     fn test_disabled_engine_returns_none() {
         let engine = disabled_engine();
-        let ctx = HealingContext::new("search", r#"{"limit":100}"#, true, 4, 0.9, 10);
+        let ctx = HealingContext::new("search", r#"{"limit":100}"#, true, None, 4, 0.9, 10);
         assert!(engine.generate_hint(&ctx).is_none());
     }
 
     #[test]
     fn test_generates_hint_for_looping_search() {
         let engine = engine();
-        let ctx = HealingContext::new("query_db", r#"{"query":"hello","limit":100}"#, true, 4, 0.8, 10);
+        let ctx = HealingContext::new(
+            "query_db", r#"{"query":"hello","limit":100}"#, true,
+            Some("timeout error".to_string()), 4, 0.8, 10,
+        );
         let hint = engine.generate_hint(&ctx);
         assert!(hint.is_some());
         let text = hint.unwrap();
@@ -214,7 +279,7 @@ mod tests {
     #[test]
     fn test_generates_hint_for_known_tool_substitution() {
         let engine = engine();
-        let ctx = HealingContext::new("web_search", r#"{"query":"rust async"}"#, false, 3, 0.5, 8);
+        let ctx = HealingContext::new("web_search", r#"{"query":"rust async"}"#, false, None, 3, 0.5, 8);
         let hint = engine.generate_hint(&ctx);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("browse_page"));
@@ -223,7 +288,7 @@ mod tests {
     #[test]
     fn test_report_outcome_and_memory_works() {
         let engine = engine();
-        let ctx = HealingContext::new("search", r#"{"limit":50}"#, true, 3, 0.6, 5);
+        let ctx = HealingContext::new("search", r#"{"limit":50}"#, true, Some("error".to_string()), 3, 0.6, 5);
 
         // First call: generate hint
         assert!(engine.generate_hint(&ctx).is_some());
@@ -239,21 +304,18 @@ mod tests {
         let engine = SelfHealingEngine::new_in_memory(SelfHealingConfig {
             enabled: true,
             mode: HealingMode::Aggressive,
-            memory_backend: "memory".into(),
-            memory_path: None,
+            ..Default::default()
         });
-        let ctx = HealingContext::new("search", r#"{"limit":50}"#, true, 4, 0.7, 8);
+        let ctx = HealingContext::new("search", r#"{"limit":50}"#, true, None, 4, 0.7, 8);
         let hint = engine.generate_hint(&ctx);
         assert!(hint.is_some());
-        // Aggressive mode has no prefix like "Adapting strategy"
         assert!(!hint.unwrap().contains("Adapting strategy"));
     }
 
     #[test]
     fn test_no_hint_for_normal_call() {
         let engine = engine();
-        let ctx = HealingContext::new("unknown_tool", r#"{}"#, false, 0, 0.0, 2);
-        // No repeating → no error → no tilt → no mutations
+        let ctx = HealingContext::new("unknown_tool", r#"{}"#, false, None, 0, 0.0, 2);
         assert!(engine.generate_hint(&ctx).is_none());
     }
 }

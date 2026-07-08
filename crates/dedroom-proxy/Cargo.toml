@@ -26,6 +26,7 @@ hyper.workspace = true
 http.workspace = true
 indicatif = "0.18.6"
 owo-colors = "4.3.0"
+ctrlc = "3.4"
 
 [dev-dependencies]
 tempfile = "3"
