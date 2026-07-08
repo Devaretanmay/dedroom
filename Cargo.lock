@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "dedroom-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "dedroom-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "dedroom-proxy"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "dedroom-py"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "dedroom-core",
  "pyo3",
@@ -563,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "dedroom-tui"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "crossterm",

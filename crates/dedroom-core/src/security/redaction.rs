@@ -150,14 +150,13 @@ impl RedactionEngine {
         }
 
         // 2. Context-aware redaction — walk JSON tree, redact sensitive field values
-        if self.config.context_detection {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&output) {
+        if self.config.context_detection
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&output) {
                 let (redacted, ctx_matches) = self.redact_context_aware(&value);
                 output = serde_json::to_string(&redacted).unwrap_or(output);
                 report.context_matches = ctx_matches.len();
                 report.items.extend(ctx_matches);
             }
-        }
 
         report.total_redacted = report.items.len();
         if !self.config.audit_log {
@@ -176,13 +175,12 @@ impl RedactionEngine {
                 let mut new_map = serde_json::Map::new();
                 let mut items = Vec::new();
                 for (k, v) in map {
-                    if self.sensitive_fields.contains(k) {
-                        if let serde_json::Value::String(s) = v {
+                    if self.sensitive_fields.contains(k)
+                        && let serde_json::Value::String(s) = v {
                             report_context_match(&mut items, k, s.len());
                             new_map.insert(k.clone(), serde_json::Value::String("[REDACTED]".into()));
                             continue;
                         }
-                    }
                     let (new_val, sub_items) = self.redact_context_aware(v);
                     items.extend(sub_items);
                     new_map.insert(k.clone(), new_val);

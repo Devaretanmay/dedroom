@@ -9,9 +9,8 @@ DedrooM sits between your AI agent and the LLM provider to:
 
 - **Detect and block infinite loops** — saves wasted API calls when tools repeat
 - **Compress context** — reduces token usage by 60–95% without changing behavior
-- **Intelligence Engine** — parses thoughts locally, injects proactive mentor coaching, tracks trust scores, and learns from failures
 - **Redact sensitive data** — strip API keys, tokens, and secrets from tool outputs
-- **Track ROI** — attribution engine shows exactly how much each tool saves
+- **Track savings** — attribution engine shows per-tool token usage
 
 ---
 
@@ -29,7 +28,7 @@ claude          # now routed through DedrooM
 codex           # works immediately
 
 # Check status and stop
-dedroom status  # Show running state, PID, uptime, tokens saved
+dedroom status  # Running state, PID, uptime, tokens saved
 dedroom stop    # Stop the daemon
 ```
 

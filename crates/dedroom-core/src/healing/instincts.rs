@@ -113,7 +113,7 @@ impl InstinctsEngine {
 
             let hint = build_hint(&rule.action, rule.confidence);
 
-            if best.as_ref().map_or(true, |(c, _)| rule.confidence > *c) {
+            if best.as_ref().is_none_or(|(c, _)| rule.confidence > *c) {
                 best = Some((rule.confidence, hint));
             }
         }
@@ -162,9 +162,9 @@ fn evaluate_condition(
 }
 
 fn check_param_exceeds(args: &str, param: &str, threshold: f64) -> bool {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(args) {
-        if let Some(obj) = value.as_object() {
-            if let Some(serde_json::Value::Number(n)) = obj.get(param) {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(args)
+        && let Some(obj) = value.as_object()
+            && let Some(serde_json::Value::Number(n)) = obj.get(param) {
                 if let Some(val) = n.as_f64() {
                     return val > threshold;
                 }
@@ -172,8 +172,6 @@ fn check_param_exceeds(args: &str, param: &str, threshold: f64) -> bool {
                     return (val as f64) > threshold;
                 }
             }
-        }
-    }
     args.contains(&format!("\"{}\":", param))
         || args.contains(&format!("{}:", param))
         || args.contains(&format!("{}=", param))

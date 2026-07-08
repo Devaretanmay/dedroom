@@ -161,7 +161,7 @@ fn parse_args() -> Result<CliCommand> {
                             port = args[i].parse().context("--port must be a number")?;
                         }
                     }
-                    _ => bail!("Unknown option: {}", args[i]),
+                    _ => bail!("Unknown option: {}. Valid: --port <N>", args[i]),
                 }
                 i += 1;
             }
@@ -246,7 +246,7 @@ fn parse_args() -> Result<CliCommand> {
                     "--json" => {
                         emit_json = true;
                     }
-                    _ => bail!("Unknown option: {}", args[i]),
+                    _ => bail!("Unknown option \"{}\". Run `dedroom` for usage.", args[i]),
                 }
                 i += 1;
             }
@@ -270,7 +270,7 @@ fn parse_args() -> Result<CliCommand> {
                             config = PathBuf::from(&args[i]);
                         }
                     }
-                    _ => bail!("Unknown option: {}", args[i]),
+                    _ => bail!("Unknown option \"{}\". Run `dedroom` for usage.", args[i]),
                 }
                 i += 1;
             }
@@ -324,7 +324,7 @@ fn parse_args() -> Result<CliCommand> {
                             api_key = Some(args[i].clone());
                         }
                     }
-                    _ => bail!("Unknown option: {}", args[i]),
+                    _ => bail!("Unknown option \"{}\". Run `dedroom` for usage.", args[i]),
                 }
                 i += 1;
             }
@@ -343,7 +343,7 @@ fn parse_args() -> Result<CliCommand> {
                             port = args[i].parse().context("--port must be a number")?;
                         }
                     }
-                    _ => bail!("Unknown option: {}", args[i]),
+                    _ => bail!("Unknown option \"{}\". Run `dedroom` for usage.", args[i]),
                 }
                 i += 1;
             }
@@ -359,7 +359,7 @@ fn parse_args() -> Result<CliCommand> {
                             port = args[i].parse().context("--port must be a number")?;
                         }
                     }
-                    _ => bail!("Unknown option: {}", args[i]),
+                    _ => bail!("Unknown option \"{}\". Run `dedroom` for usage.", args[i]),
                 }
                 i += 1;
             }
@@ -375,7 +375,7 @@ fn parse_args() -> Result<CliCommand> {
                             port = args[i].parse().context("--port must be a number")?;
                         }
                     }
-                    _ => bail!("Unknown option: {}", args[i]),
+                    _ => bail!("Unknown option \"{}\". Run `dedroom` for usage.", args[i]),
                 }
                 i += 1;
             }
@@ -437,7 +437,7 @@ fn parse_args() -> Result<CliCommand> {
             let cmd = cmd_parts.remove(0);
             Ok(CliCommand::Run { port, connect_port, config, cmd, cmd_args: cmd_parts })
         }
-        _ => bail!("Unknown command: {command}. Use: init | start | stop | deinit | status | wrap | unwrap | doctor | proxy | run"),
+        _ => bail!("Unknown command: \"{command}\". Available: init, status, stop, wrap, unwrap, doctor, proxy, run, report, dash. Run `dedroom` alone to see full usage."),
     }
 }
 
@@ -499,7 +499,7 @@ fn start_proxy(port: u16, connect_port: u16, config: &Path, upstream_url: Option
         .stderr(Stdio::inherit()) // proxy errors visible
         .spawn()
         .context(format!(
-            "Failed to start proxy at {}",
+            "Failed to start proxy at {}. Check that the binary exists and is executable (cargo build -p dedroom-cli -p dedroom-proxy)",
             proxy_path.display()
         ))?;
 
@@ -636,7 +636,7 @@ fn spawn_proxy_child(proxy_path: &Path, args: &[String]) -> Result<std::process:
         .stderr(log_clone)
         .stdin(Stdio::null())
         .spawn()
-        .with_context(|| format!("Failed to start proxy at {}", proxy_path.display()))
+        .with_context(|| format!("Failed to start proxy at {}. Run `cargo build -p dedroom-cli -p dedroom-proxy` first.", proxy_path.display()))
 }
 
 /// Path for the port-specific stopping flag file.
@@ -712,8 +712,8 @@ async fn stop_daemon_proxy(port: u16) -> Result<bool> {
     }
 
     // Fallback: query health endpoint
-    if check_port(port) {
-        if let Some(pid) = query_proxy_pid(port).await {
+    if check_port(port)
+        && let Some(pid) = query_proxy_pid(port).await {
             eprintln!("  Stopping proxy (PID {})...", pid);
             std::fs::write(&stopping_file, "stopping").ok();
             kill_process_by_id(pid, true);
@@ -721,7 +721,6 @@ async fn stop_daemon_proxy(port: u16) -> Result<bool> {
             eprintln!("  Proxy stopped.");
             return Ok(true);
         }
-    }
 
     eprintln!("  No running proxy daemon found on port {}.", port);
     Ok(false)
@@ -1176,9 +1175,9 @@ async fn fetch_dynamic_models(upstream_url: Option<&str>, api_key: Option<&str>)
         req = req.bearer_auth(key);
     }
     
-    if let Ok(resp) = req.send().await {
-        if let Ok(json) = resp.json::<serde_json::Value>().await {
-            if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+    if let Ok(resp) = req.send().await
+        && let Ok(json) = resp.json::<serde_json::Value>().await
+            && let Some(data) = json.get("data").and_then(|d| d.as_array()) {
                 let mut fetched = serde_json::Map::new();
                 for item in data {
                     if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
@@ -1192,8 +1191,6 @@ async fn fetch_dynamic_models(upstream_url: Option<&str>, api_key: Option<&str>)
                     return fetched;
                 }
             }
-        }
-    }
     default_models
 }
 
@@ -1268,7 +1265,7 @@ fn restore_opencode_provider_config() -> Result<(String, PathBuf)> {
 fn check_port(port: u16) -> bool {
     use std::net::TcpStream;
     TcpStream::connect_timeout(
-        &format!("127.0.0.1:{}", port).parse().unwrap(),
+        &format!("127.0.0.1:{port}").parse().unwrap(),
         Duration::from_millis(1000),
     )
     .is_ok()
@@ -1596,11 +1593,10 @@ async fn run_command(
         kill_process_by_id(proxy_child.id(), true);
         proxy_child.wait().ok();
 
-        if !status.success() {
-            if let Some(code) = status.code() {
+        if !status.success()
+            && let Some(code) = status.code() {
                 bail!("Command exited with code {}", code);
             }
-        }
     } else {
         // Proxy already running — just inject env vars
         let proxy_url = format!("http://127.0.0.1:{}", port);
@@ -1625,11 +1621,10 @@ async fn run_command(
 
         let status = child.wait().context("Failed to wait for command")?;
 
-        if !status.success() {
-            if let Some(code) = status.code() {
+        if !status.success()
+            && let Some(code) = status.code() {
                 bail!("Command exited with code {}", code);
             }
-        }
     }
 
     Ok(())
@@ -2631,7 +2626,7 @@ async fn status(port: u16, connect_port: u16) -> Result<i32> {
     let base_url = format!("http://127.0.0.1:{}", port);
 
     // Check PID lock file (preferred) or legacy PID file
-    let pid_from_file = read_pid_from_lock(port).or_else(|| read_legacy_pid_file());
+    let pid_from_file = read_pid_from_lock(port).or_else(read_legacy_pid_file);
 
     // Try health endpoint (async)
     let client = reqwest::Client::builder()
@@ -2686,11 +2681,11 @@ async fn status(port: u16, connect_port: u16) -> Result<i32> {
     eprintln!();
 
     if health.is_some() {
-        eprintln!("  Status:      {} RUNNING", "●".to_string());
+        eprintln!("  Status:      ● RUNNING");
     } else if is_port_open {
-        eprintln!("  Status:      {} PORT OPEN (not responding)", "○".to_string());
+        eprintln!("  Status:      ○ PORT OPEN (not responding)");
     } else {
-        eprintln!("  Status:      {} STOPPED", "○".to_string());
+        eprintln!("  Status:      ○ STOPPED");
     }
 
     eprintln!("  Version:     v{}", version);
@@ -2751,8 +2746,8 @@ async fn status(port: u16, connect_port: u16) -> Result<i32> {
     }
 
     // Self-healing stats
-    if let Some(l) = learning {
-        if let Some(stats) = l.get("stats") {
+    if let Some(l) = learning
+        && let Some(stats) = l.get("stats") {
             let attempts = stats.get("total_attempts").and_then(|v| v.as_u64()).unwrap_or(0);
             let successes = stats.get("total_successes").and_then(|v| v.as_u64()).unwrap_or(0);
             let rate = stats.get("success_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -2776,7 +2771,6 @@ async fn status(port: u16, connect_port: u16) -> Result<i32> {
                 }
             }
         }
-    }
 
     eprintln!();
     eprintln!("  ── Files ────────────────────────────────────────");
@@ -2805,22 +2799,24 @@ async fn report(port: u16) -> Result<i32> {
         .build()
         .ok();
 
-    // Fetch health for uptime, attribution for report data
+    // Fetch health for uptime, attribution for report data, learning for healing stats
     let health = match &client {
         Some(c) => fetch_json_async(c, &format!("{}/health", base_url)).await,
         None => None,
     };
 
-    let att = match (health.as_ref(), &client) {
+    let (att, learning) = match (health.as_ref(), &client) {
         (Some(_), Some(c)) => {
-            let url = format!("{}/admin/attribution", base_url);
-            fetch_json_async(c, &url).await
+            let att = fetch_json_async(c, &format!("{}/admin/attribution", base_url)).await;
+            let learning = fetch_json_async(c, &format!("{}/admin/learning", base_url)).await;
+            (att, learning)
         }
-        _ => None,
+        _ => (None, None),
     };
 
     if att.is_none() {
-        eprintln!("  Proxy not running on port {}", port);
+        eprintln!("  Error: proxy not running on port {}.", port);
+        eprintln!("  Start it with:  dedroom init");
         return Ok(1);
     }
 
@@ -2838,27 +2834,44 @@ async fn report(port: u16) -> Result<i32> {
     let estimated_cost_saved = a.get("estimated_cost_saved_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let uptime = health.and_then(|h| h.get("uptime_seconds").and_then(|u| u.as_u64())).unwrap_or(0);
 
-    eprintln!();
-    eprintln!("  ── Compression Report ────────────────────────────");
-    eprintln!();
-    eprintln!("  Uptime:              {}", format_duration(uptime));
-    eprintln!("  Calls processed:     {:>12}", total_calls);
-    eprintln!("  Calls blocked:       {:>12}", blocked_calls);
-    eprintln!("  Error calls:         {:>12}", error_calls);
-    eprintln!("  Cache hits:          {:>12}", cache_hits);
-    eprintln!("  Tokens processed:    {:>12}", total_tokens_processed);
-    eprintln!("  Tokens saved:        {:>12}  ({:.1}%)", total_tokens_saved, savings_ratio * 100.0);
-    eprintln!("    Compression:       {:>12}", total_compression);
-    eprintln!("    Loop detection:    {:>12}", total_loop);
-    eprintln!("  Est. cost saved:     {:>12}", format!("${:.4}", estimated_cost_saved));
+    let version = option_env!("CARGO_PKG_VERSION").unwrap_or("0.1.0");
 
-    if let Some(tools) = a.get("per_tool").and_then(|v| v.as_array()) {
-        if !tools.is_empty() {
+    eprintln!();
+    eprintln!("  ╔═════════════════════════════════════════════════╗");
+    eprintln!("  ║         DEDROOM REPORT                        ║");
+    eprintln!("  ╚═════════════════════════════════════════════════╝");
+    eprintln!();
+    eprintln!("  v{} · {} · {} calls", version, format_duration(uptime), total_calls);
+    eprintln!();
+
+    // ── Savings summary ──
+    eprintln!("  ── Token Savings ─────────────────────────────────");
+    eprintln!();
+    eprintln!("  Total tokens processed: {:>12}", total_tokens_processed);
+    eprintln!("  Total tokens saved:     {:>12}  ({:.1}%)", total_tokens_saved, savings_ratio * 100.0);
+    eprintln!("    Compression:          {:>12}", total_compression);
+    eprintln!("    Loop detection:       {:>12}", total_loop);
+    eprintln!("  Calls blocked:          {:>12}", blocked_calls);
+    eprintln!("  Error calls:            {:>12}", error_calls);
+    eprintln!("  Cache hits:             {:>12}", cache_hits);
+    eprintln!("  Est. cost saved:        {:>12}", format!("${:.4}", estimated_cost_saved));
+
+    // ── Per-tool breakdown ──
+    if let Some(tools) = a.get("per_tool").and_then(|v| v.as_array())
+        && !tools.is_empty() {
+            let mut sorted: Vec<&serde_json::Value> = tools.iter().collect();
+            sorted.sort_by(|a, b| {
+                let sa = a.get("tokens_saved").and_then(|v| v.as_u64()).unwrap_or(0);
+                let sb = b.get("tokens_saved").and_then(|v| v.as_u64()).unwrap_or(0);
+                sb.cmp(&sa)
+            });
+
             eprintln!();
-            eprintln!("  By tool:");
-            eprintln!("  {:<22} {:>6} {:>12} {:>12} {:>8} {:>8}", "Tool", "Calls", "Processed", "Saved", "Ratio", "Blocked");
-            eprintln!("  {}", "-".repeat(72));
-            for tool in tools {
+            eprintln!("  ── Top Tools by Savings ──────────────────────────");
+            eprintln!();
+            eprintln!("  {:<20} {:>6} {:>10} {:>10} {:>7} {:>7}", "Tool", "Calls", "Processed", "Saved", "Ratio", "Blkd");
+            eprintln!("  {}", "-".repeat(66));
+            for tool in sorted.iter().take(10) {
                 let name = tool.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
                 let calls = tool.get("call_count").and_then(|v| v.as_u64()).unwrap_or(0);
                 let processed = tool.get("tokens_processed").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -2866,16 +2879,78 @@ async fn report(port: u16) -> Result<i32> {
                 let ratio = tool.get("compression_ratio").and_then(|v| v.as_f64());
                 let blocked = tool.get("blocked_count").and_then(|v| v.as_u64()).unwrap_or(0);
                 let ratio_str = match ratio {
-                    Some(r) if r > 0.0 => format!("{:>6.1}%", r * 100.0),
-                    _ => "   —  ".to_string(),
+                    Some(r) if r > 0.0 => format!("{:>6.0}%", r * 100.0),
+                    _ => "    —".to_string(),
                 };
-                eprintln!("  {:<22} {:>6} {:>12} {:>12} {:>8} {:>8}", name, calls, processed, saved, ratio_str, blocked);
+                let (processed_str, saved_str) = (fmt_tokens(processed), fmt_tokens(saved));
+                eprintln!("  {:<20} {:>6} {:>10} {:>10} {:>7} {:>7}", name, calls, processed_str, saved_str, ratio_str, blocked);
+            }
+        }
+
+    // ── Waste breakdown from attribution ──
+    if let Some(waste) = a.get("waste") {
+        let error_waste = waste.get("error_waste_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let uncompressible_waste = waste.get("uncompressible_waste_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let uncompressible_count = waste.get("uncompressible_call_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        if error_waste > 0 || uncompressible_waste > 0 {
+            eprintln!();
+            eprintln!("  ── Waste Analysis ────────────────────────────────");
+            eprintln!();
+            if error_waste > 0 {
+                eprintln!("  Tokens wasted on errors: {:>12}", error_waste);
+            }
+            if uncompressible_waste > 0 {
+                eprintln!("  Uncompressible content:  {:>12} ({} calls)", uncompressible_waste, uncompressible_count);
             }
         }
     }
 
+    // ── Self-healing stats ──
+    if let Some(l) = learning
+        && let Some(stats) = l.get("stats") {
+            let attempts = stats.get("total_attempts").and_then(|v| v.as_u64()).unwrap_or(0);
+            let successes = stats.get("total_successes").and_then(|v| v.as_u64()).unwrap_or(0);
+            let rate = stats.get("success_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if attempts > 0 {
+                eprintln!();
+                eprintln!("  ── Self-Healing ────────────────────────────────");
+                eprintln!();
+                eprintln!("  Mutation attempts: {:>6}", attempts);
+                eprintln!("  Successful:        {:>6}", successes);
+                eprintln!("  Success rate:      {:>5.1}%", rate * 100.0);
+                if let Some(by_tool) = stats.get("by_tool").and_then(|v| v.as_array()) {
+                    let mut sorted: Vec<&serde_json::Value> = by_tool.iter().collect();
+                    sorted.sort_by(|a, b| {
+                        let ta = a.get("total_attempts").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let tb = b.get("total_attempts").and_then(|v| v.as_u64()).unwrap_or(0);
+                        tb.cmp(&ta)
+                    });
+                    eprintln!();
+                    for tool in sorted.iter().filter_map(|t| {
+                        let name = t.get("tool_name").and_then(|v| v.as_str())?;
+                        let ta = t.get("total_attempts").and_then(|v| v.as_u64())?;
+                        let ts = t.get("successes").and_then(|v| v.as_u64())?;
+                        Some((name, ta, ts))
+                    }) {
+                        let pct = if tool.1 > 0 { tool.2 as f64 / tool.1 as f64 * 100.0 } else { 0.0 };
+                        eprintln!("    {:<20} {:>3}/{:>3} ({:>4.0}%)", tool.0, tool.2, tool.1, pct);
+                    }
+                }
+            }
+        }
+
     eprintln!();
     Ok(0)
+}
+
+fn fmt_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{}", n)
+    }
 }
 
 fn capitalize(s: &str) -> String {
@@ -3066,7 +3141,7 @@ async fn main() -> Result<()> {
             }
 
             // Daemon mode (default)
-            let (pid, _already_running) = if let Some(pid) = read_pid_from_lock(port).or_else(|| read_legacy_pid_file()) {
+            let (pid, _already_running) = if let Some(pid) = read_pid_from_lock(port).or_else(read_legacy_pid_file) {
                 eprintln!("  Proxy already running (PID {}) on port {}.", pid, port);
                 (pid, true)
             } else {
@@ -3078,7 +3153,8 @@ async fn main() -> Result<()> {
                 let health_url = format!("http://127.0.0.1:{}/health", port);
                 let ready = poll_health_async(&health_url, 10, 500).await;
                 if !ready {
-                    eprintln!("  [WARN] Proxy not ready after 5 seconds. Check {} for errors.", LOG_FILE);
+                    eprintln!("  [WARN] Proxy not ready after 5 seconds.");
+                    eprintln!("         Check {} for errors, or try: dedroom proxy --no-daemon", LOG_FILE);
                 }
                 (pid, false)
             };

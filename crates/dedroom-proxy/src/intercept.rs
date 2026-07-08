@@ -371,7 +371,7 @@ pub async fn forward_to_upstream(
 
     let base_clean = base_url.trim_end_matches('/');
     let base_clean = if base_clean.ends_with("/v1") && path.starts_with("/v1/") {
-        base_clean.strip_suffix("/v1").unwrap()
+        base_clean.strip_suffix("/v1").unwrap_or(base_clean)
     } else {
         base_clean
     };

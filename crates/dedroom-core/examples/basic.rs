@@ -14,7 +14,7 @@ fn main() {
     let config = DedrooMConfig::from_yaml_str(r#"
 loop_detection:
   max_repeats: 3
-  strictness: balanced
+  strictness: Balanced
 "#).expect("valid config");
 
     let mut detector = LoopDetector::new(&config.loop_detection);
@@ -61,8 +61,8 @@ loop_detection:
         Ok(result) => {
             println!("  Original: {} rows → Compressed: {} rows ({} dropped)",
                 result.original_count, result.compressed_count, result.rows_dropped);
-            let orig = (json_input.len() as f64 / 4.0).ceil() as f64;
-            let compr = (result.content.len() as f64 / 4.0).ceil() as f64;
+            let orig = (json_input.len() as f64 / 4.0).ceil();
+            let compr = (result.content.len() as f64 / 4.0).ceil();
             println!("  Compression ratio: {:.1}%", orig / compr * 100.0);
             println!("  Output: {}", result.content);
         }

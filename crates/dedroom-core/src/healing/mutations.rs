@@ -58,12 +58,12 @@ pub fn parameter_tweak(ctx: &MutationContext) -> Vec<Mutation> {
     }
 
     let mut mutations = Vec::new();
-    if let Ok(args) = serde_json::from_str::<Value>(ctx.tool_args) {
-        if let Value::Object(map) = &args {
+    if let Ok(args) = serde_json::from_str::<Value>(ctx.tool_args)
+        && let Value::Object(map) = &args {
             for param in VOLATILE_PARAMS {
-                if let Some(Value::Number(n)) = map.get(*param) {
-                    if let Some(val) = n.as_u64() {
-                        if val > 1 {
+                if let Some(Value::Number(n)) = map.get(*param)
+                    && let Some(val) = n.as_u64()
+                        && val > 1 {
                             let reduced = if val > 100 { val / 10 } else { val / 2 }.max(1);
                             mutations.push(Mutation {
                                 strategy: "parameter_tweak",
@@ -77,11 +77,8 @@ pub fn parameter_tweak(ctx: &MutationContext) -> Vec<Mutation> {
                             // Only the most impactful tweak
                             break;
                         }
-                    }
-                }
             }
         }
-    }
     mutations
 }
 
@@ -126,22 +123,19 @@ pub fn decomposition(ctx: &MutationContext) -> Vec<Mutation> {
     }
 
     // Also suggest decomposition for search/read tools with large result sets
-    if ctx.tilt_index > 0.6 {
-        if let Ok(args) = serde_json::from_str::<Value>(ctx.tool_args) {
+    if ctx.tilt_index > 0.6
+        && let Ok(args) = serde_json::from_str::<Value>(ctx.tool_args) {
             let has_limit = args.get("limit").or_else(|| args.get("max_results"));
             if has_limit.is_some_and(|v| v.as_u64().unwrap_or(0) > 10) {
                 mutations.push(Mutation {
                     strategy: "decomposition",
-                    suggestion: format!(
-                        "The result set may be too large. Try a more specific query or \
-                         use filtering to narrow results before processing."
-                    ),
+                    suggestion: "The result set may be too large. Try a more specific query or \
+                         use filtering to narrow results before processing.".to_string(),
                     confidence: 0.5,
                     risk: 0.2,
                 });
             }
         }
-    }
 
     mutations
 }

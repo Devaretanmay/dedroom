@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "dedroom"
-version = "0.4.0"
+version = "0.5.0"
 description = "Unified agent runtime: loop detection + context compression for AI coding agents"
 readme = "python/README.md"
 license = { file = "LICENSE" }

@@ -142,8 +142,8 @@ impl SelfHealingEngine {
         let best = mutations::pick_best(&mutations_ctx);
 
         // Use memory suggestion if confidence is high enough
-        if let Some((ref strategy, confidence)) = memory_suggestion {
-            if confidence >= 0.6 {
+        if let Some((ref strategy, confidence)) = memory_suggestion
+            && confidence >= 0.6 {
                 let hint = format!(
                     "{} [learned from past sessions] {}",
                     match self.config.mode {
@@ -158,7 +158,6 @@ impl SelfHealingEngine {
                 }
                 return Some(hint);
             }
-        }
 
         // Prefer remembered strategy if high confidence, otherwise fresh mutation
         let memory_strategy = self.memory.best_strategy(&context.tool_name);
@@ -184,7 +183,8 @@ impl SelfHealingEngine {
             (None, None) => return None,
         };
 
-        let result = mutation.map(|m| {
+        
+        mutation.map(|m| {
             if let Ok(mut store) = self.pending_outcome.lock() {
                 store.insert(context.tool_name.clone(), m.strategy.to_string());
             }
@@ -194,8 +194,7 @@ impl SelfHealingEngine {
                 crate::config::HealingMode::Aggressive => "",
             };
             format!("{}{}", prefix, m.suggestion)
-        });
-        result
+        })
     }
 
     /// Get a reference to the instincts engine.

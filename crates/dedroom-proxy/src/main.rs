@@ -116,28 +116,24 @@ fn acquire_pid_lock(port: u16) -> Result<PidLock, String> {
                 return Ok(PidLock { path: lock_path });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                match std::fs::read_to_string(&lock_path) {
-                    Ok(content) => {
-                        if let Ok(pid) = content.trim().parse::<u32>() {
-                            let alive = Command::new("kill")
-                                .arg("-0")
-                                .arg(pid.to_string())
-                                .stdout(Stdio::null())
-                                .stderr(Stdio::null())
-                                .status()
-                                .ok()
-                                .map(|s| s.success())
-                                .unwrap_or(false);
-                            if alive {
-                                return Err(format!(
-                                    "Another proxy is already running on port {} (PID {})",
-                                    port, pid
-                                ));
-                            }
+                if let Ok(content) = std::fs::read_to_string(&lock_path)
+                    && let Ok(pid) = content.trim().parse::<u32>() {
+                        let alive = Command::new("kill")
+                            .arg("-0")
+                            .arg(pid.to_string())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status()
+                            .ok()
+                            .map(|s| s.success())
+                            .unwrap_or(false);
+                        if alive {
+                            return Err(format!(
+                                "Another proxy is already running on port {} (PID {})",
+                                port, pid
+                            ));
                         }
                     }
-                    Err(_) => {}
-                }
                 std::fs::remove_file(&lock_path).ok();
                 continue;
             }
