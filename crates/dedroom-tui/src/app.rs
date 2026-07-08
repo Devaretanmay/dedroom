@@ -60,17 +60,12 @@ impl Tab {
 pub struct DataSample {
     pub tokens_saved: u64,
     pub compression_ratio: f64,
-    pub savings_ratio: f64,
-    pub blocked_calls: u64,
-    pub total_calls: u64,
-    pub estimated_cost_saved: f64,
 }
 
 /// Top-level application state for the TUI dashboard.
 #[derive(Debug)]
 pub struct App {
     // ── Connection ──────────────────────────────────────────────────────
-    pub port: u16,
     pub api: api::DashboardApi,
     pub is_connected: bool,
     pub error: Option<String>,
@@ -114,7 +109,6 @@ impl App {
     /// Create a new app state targeting the proxy on `port`.
     pub fn new(port: u16) -> Self {
         Self {
-            port,
             api: api::DashboardApi::new(port),
             is_connected: false,
             error: None,
@@ -197,10 +191,6 @@ impl App {
         let sample = DataSample {
             tokens_saved: self.total_tokens_saved,
             compression_ratio: self.compression_avg.max(0.0),
-            savings_ratio: self.savings_avg.max(0.0),
-            blocked_calls: self.blocked_calls,
-            total_calls: self.total_calls_processed,
-            estimated_cost_saved: self.total_dollars_saved,
         };
         self.history.push_back(sample);
         while self.history.len() > MAX_HISTORY_SAMPLES {
@@ -225,11 +215,6 @@ impl App {
             self.events.pop_front();
         }
         self.sse_activity = true;
-    }
-
-    /// Set self-healed count (updated from healing engine).
-    pub fn set_self_healed_count(&mut self, count: usize) {
-        self.self_healed_count = count;
     }
 
     /// Set an error message to display.
@@ -298,11 +283,6 @@ impl App {
     /// Get bytes count for the SSE live indicator.
     pub fn event_count(&self) -> usize {
         self.events.len()
-    }
-
-    /// Whether the proxy has been reached at least once.
-    pub fn is_empty(&self) -> bool {
-        self.stats.is_none() && self.attribution.is_none()
     }
 
     /// Uptime string from health data.

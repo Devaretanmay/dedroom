@@ -11,7 +11,6 @@ pub enum LoopState {
     None,
     Detected,
     ErrorLoop,
-    Recovering,
 }
 
 // ── Pure functions ─────────────────────────────────────────────────────────
@@ -24,7 +23,6 @@ pub fn determine_level(state: LoopState, coupling: &LoopCompressionCoupling) -> 
         LoopState::None => CompressionBudget::Normal,
         LoopState::Detected => coupling.on_detected.compression_budget,
         LoopState::ErrorLoop => coupling.on_error_loop.compression_budget,
-        LoopState::Recovering => coupling.on_recovery.compression_budget,
     }
 }
 
@@ -42,10 +40,6 @@ pub fn hint_template(state: LoopState, coupling: &LoopCompressionCoupling) -> Op
         LoopState::Detected => coupling.on_detected.hint_template.as_deref(),
         _ => None,
     }
-}
-
-pub fn fresh_context_window(coupling: &LoopCompressionCoupling) -> usize {
-    coupling.on_recovery.fresh_context_window
 }
 
 pub fn retention_for_level(budget: CompressionBudget) -> f64 {
@@ -80,10 +74,6 @@ mod tests {
                 inject_hint: true,
                 hint_template: Some("You are looping on '{tool}'. Try a completely different approach.".into()),
             },
-            on_recovery: crate::config::RecoveryCouplingAction {
-                compression_budget: CompressionBudget::Moderate,
-                fresh_context_window: 3,
-            },
         }
     }
 
@@ -105,12 +95,6 @@ mod tests {
     fn test_error_loop_triggers_maximum() {
         let coupling = default_coupling();
         assert_eq!(determine_level(LoopState::ErrorLoop, &coupling), CompressionBudget::Maximum);
-    }
-
-    #[test]
-    fn test_recovery_is_moderate() {
-        let coupling = default_coupling();
-        assert_eq!(determine_level(LoopState::Recovering, &coupling), CompressionBudget::Moderate);
     }
 
     #[test]

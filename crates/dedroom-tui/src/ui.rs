@@ -11,6 +11,8 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Paragraph},
 };
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::app::{App, Tab};
 use crate::components::{
     header, healing_panel, loops_panel, savings_overview, summary_export, timeline, tool_breakdown,
@@ -18,25 +20,12 @@ use crate::components::{
 };
 
 /// Current zoom level for the timeline (index into ZOOM_OPTIONS).
-static mut ZOOM_LEVEL: usize = 1; // default 5m
-
-/// Set the zoom level for the timeline.
-pub fn set_zoom_level(level: usize) {
-    unsafe {
-        ZOOM_LEVEL = level.min(timeline::ZOOM_OPTIONS.len() - 1);
-    }
-}
-
-/// Get the current zoom level.
-pub fn zoom_level() -> usize {
-    unsafe { ZOOM_LEVEL }
-}
+static ZOOM_LEVEL: AtomicUsize = AtomicUsize::new(1); // default 5m
 
 /// Cycle zoom level (for keyboard shortcuts).
 pub fn cycle_zoom() {
-    unsafe {
-        ZOOM_LEVEL = (ZOOM_LEVEL + 1) % timeline::ZOOM_OPTIONS.len();
-    }
+    let next = (ZOOM_LEVEL.load(Ordering::Relaxed) + 1) % timeline::ZOOM_OPTIONS.len();
+    ZOOM_LEVEL.store(next, Ordering::Relaxed);
 }
 
 /// Render the current tab's content into the terminal frame.
@@ -94,7 +83,7 @@ fn render_overview_tab(frame: &mut Frame, area: Rect, app: &App) {
         .split(vert[1]);
 
     render_top_tools(frame, mid[0], app);
-    timeline::render_timeline(frame, mid[1], app, unsafe { ZOOM_LEVEL });
+    timeline::render_timeline(frame, mid[1], app, ZOOM_LEVEL.load(Ordering::Relaxed));
 
     // Bottom: Loops summary
     loops_panel::render_loop_summary(frame, vert[2], app);

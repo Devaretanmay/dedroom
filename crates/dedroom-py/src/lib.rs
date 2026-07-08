@@ -140,7 +140,7 @@ impl DedrooM {
     ///     args: JSON string of tool arguments.
     ///     result: Tool output content (may be empty).
     ///     is_error: Whether the tool call resulted in an error.
-    #[pyo3(signature = (tool, args, result="", is_error=false, agent_id=None, agent_thought=None))]
+    #[pyo3(signature = (tool, args, result="", is_error=false, agent_id=None))]
     fn process_tool<'py>(
         &mut self,
         tool: &str,
@@ -148,7 +148,6 @@ impl DedrooM {
         result: &str,
         is_error: bool,
         agent_id: Option<String>,
-        agent_thought: Option<String>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let tool_call = ToolCall {

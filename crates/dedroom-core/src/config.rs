@@ -31,20 +31,8 @@ impl Default for DedrooMConfig {
         Self {
             loop_detection: LoopDetectionConfig::default(),
             compression: CompressionConfig::default(),
-            loop_compression_coupling: LoopCompressionCoupling {
-                enabled: true,
-                on_detected: LoopCouplingAction { compression_budget: CompressionBudget::Aggressive, inject_hint: false, hint_template: None },
-                on_error_loop: LoopCouplingAction {
-                    compression_budget: CompressionBudget::Maximum,
-                    inject_hint: true,
-                    hint_template: Some("You are looping on '{tool}'. Try a completely different approach.".into()),
-                },
-                on_recovery: RecoveryCouplingAction { compression_budget: CompressionBudget::Moderate, fresh_context_window: 3 },
-            },
-            security: SecurityConfig {
-                redaction_enabled: true, context_detection: true,
-                audit_log: true, custom_patterns: Vec::new(),
-            },
+            loop_compression_coupling: default_coupling(),
+            security: default_security(),
             self_healing: SelfHealingConfig::default(),
         }
     }
@@ -196,8 +184,6 @@ pub struct LoopCompressionCoupling {
     pub on_detected: LoopCouplingAction,
     #[serde(default)]
     pub on_error_loop: LoopCouplingAction,
-    #[serde(default)]
-    pub on_recovery: RecoveryCouplingAction,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -205,12 +191,6 @@ pub struct LoopCouplingAction {
     pub compression_budget: CompressionBudget,
     pub inject_hint: bool,
     pub hint_template: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RecoveryCouplingAction {
-    pub compression_budget: CompressionBudget,
-    pub fresh_context_window: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -295,7 +275,6 @@ fn default_coupling() -> LoopCompressionCoupling {
             inject_hint: true,
             hint_template: Some("You are looping on '{tool}'. Try a completely different approach.".into()),
         },
-        on_recovery: RecoveryCouplingAction { compression_budget: CompressionBudget::Moderate, fresh_context_window: 3 },
     }
 }
 fn default_security() -> SecurityConfig {

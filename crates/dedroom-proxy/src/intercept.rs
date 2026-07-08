@@ -30,8 +30,6 @@ pub struct ExtractedTool {
     pub args: String,
     pub result: Option<String>,
     pub is_error: bool,
-    #[allow(dead_code)]
-    pub agent_thought: Option<String>,
 }
 
 /// Extract tool calls from an OpenAI-formatted request body.
@@ -44,7 +42,6 @@ pub fn extract_tool_calls_openai(body: &Value) -> Vec<ExtractedTool> {
         for msg in messages {
             // Assistant messages may contain tool_calls
             if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
-                let assistant_content = msg.get("content").and_then(|c| c.as_str()).map(|s| s.to_string());
                 for tc in tool_calls {
                     let id = tc
                         .get("id")
@@ -68,7 +65,6 @@ pub fn extract_tool_calls_openai(body: &Value) -> Vec<ExtractedTool> {
                         args,
                         result: None,
                         is_error: false,
-                        agent_thought: assistant_content.clone(),
                     });
                 }
             }
@@ -121,16 +117,6 @@ pub fn extract_tool_calls_anthropic(body: &Value) -> Vec<ExtractedTool> {
     if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
         for msg in messages {
             if let Some(content_blocks) = msg.get("content").and_then(|c| c.as_array()) {
-                let mut assistant_content = String::new();
-                for block in content_blocks {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            assistant_content.push_str(text);
-                            assistant_content.push('\n');
-                        }
-                    }
-                }
-                
                 for block in content_blocks {
                     let block_type = block
                         .get("type")
@@ -153,7 +139,6 @@ pub fn extract_tool_calls_anthropic(body: &Value) -> Vec<ExtractedTool> {
                                 args,
                                 result: None,
                                 is_error: false,
-                                agent_thought: if assistant_content.is_empty() { None } else { Some(assistant_content.clone()) },
                             });
                         }
                         "tool_result" => {
@@ -645,7 +630,6 @@ mod tests {
                 args: r#"{"path":"/tmp/test.txt"}"#.into(),
                 result: Some("error: permission denied".into()),
                 is_error: true,
-                agent_thought: None,
             })
             .collect();
 
@@ -774,7 +758,6 @@ mod tests {
             args: r#"{"path":"/"}"#.into(),
             result: Some("error: permission denied".into()),
             is_error: true,
-            agent_thought: None,
         };
 
         // Call 1: allowed (first occurrence)
@@ -813,7 +796,6 @@ mod tests {
             args: r#"{"path":"/tmp","pattern":"*.txt"}"#.into(),
             result: Some("found 3 matching files".into()),
             is_error: false,
-            agent_thought: None,
         };
 
         let (allowed, blocked) = process_tools_through_pipeline(
@@ -864,7 +846,6 @@ mod tests {
             args: r#"{"query":"test"}"#.into(),
             result: Some("some result".into()),
             is_error: true,
-            agent_thought: None,
         };
 
         // Call 1: allowed
@@ -932,7 +913,6 @@ mod tests {
                 args: r#"{"path":"/tmp/secret.txt"}"#.into(),
                 result: Some("access denied".into()),
                 is_error: true,
-                agent_thought: None,
             })
             .collect();
 

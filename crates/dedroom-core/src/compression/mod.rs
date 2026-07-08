@@ -16,7 +16,7 @@ pub use smart_crusher::compress_json_array;
 pub use code_compressor::compress_code;
 pub use log_compressor::compress_logs;
 pub use text_compressor::compress_text;
-pub use policy::{determine_level, should_inject_hint, hint_template, retention_for_level, fresh_context_window, skip_identical_content};
+pub use policy::{determine_level, should_inject_hint, hint_template, retention_for_level, skip_identical_content};
 
 /// Result of compressing a content block.
 #[derive(Debug, Clone)]

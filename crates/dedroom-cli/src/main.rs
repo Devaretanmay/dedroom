@@ -591,34 +591,6 @@ fn rotate_log_if_needed() {
 
 // ── Command builder ────────────────────────────────────────────────────────
 
-/// Build the proxy command arguments as a Vec<String> so they can be
-/// serialized and reused by the auto-restart monitor thread.
-fn build_proxy_args(
-    port: u16,
-    connect_port: u16,
-    config: &str,
-    upstream_url: Option<&str>,
-    api_key: Option<&str>,
-) -> Vec<String> {
-    let mut args = vec![
-        "--port".to_string(),
-        port.to_string(),
-        "--connect-port".to_string(),
-        connect_port.to_string(),
-        "--config".to_string(),
-        config.to_string(),
-    ];
-    if let Some(url) = upstream_url {
-        args.push("--upstream-url".to_string());
-        args.push(url.to_string());
-    }
-    if let Some(key) = api_key {
-        args.push("--api-key".to_string());
-        args.push(key.to_string());
-    }
-    args
-}
-
 /// Build the proxy command arguments with --supervised flag for the
 /// auto-restart daemon supervisor (PID lock + crash recovery).
 fn build_proxy_supervised_args(

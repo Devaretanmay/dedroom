@@ -27,19 +27,12 @@ pub enum InstinctCondition {
     OnRepeat { min_repeats: u32 },
 }
 
-/// What the instinct does when triggered.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum InstinctAction {
-    /// Inject this text as a hint into the response.
-    Suggest(String),
-}
-
 /// A user-defined instinct rule from config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstinctRuleDef {
     pub tool: String,
     pub condition: InstinctCondition,
-    pub action: InstinctAction,
+    pub action: String,
     #[serde(default = "default_rule_confidence")]
     pub confidence: f64,
 }
@@ -71,7 +64,7 @@ impl Default for InstinctsConfig {
 struct InstinctRule {
     pub tool_name: String,
     pub condition: InstinctCondition,
-    pub action: InstinctAction,
+    pub action: String,
     pub confidence: f64,
 }
 
@@ -186,16 +179,12 @@ fn check_param_exceeds(args: &str, param: &str, threshold: f64) -> bool {
         || args.contains(&format!("{}=", param))
 }
 
-fn build_hint(action: &InstinctAction, confidence: f64) -> String {
-    match action {
-        InstinctAction::Suggest(text) => {
-            format!(
-                "[Instinct] {} (confidence: {:.0}%)",
-                text,
-                confidence * 100.0,
-            )
-        }
-    }
+fn build_hint(action: &str, confidence: f64) -> String {
+    format!(
+        "[Instinct] {} (confidence: {:.0}%)",
+        action,
+        confidence * 100.0,
+    )
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -214,7 +203,7 @@ mod tests {
         let engine = engine_with_rules(vec![InstinctRuleDef {
             tool: "write_file".into(),
             condition: InstinctCondition::Always,
-            action: InstinctAction::Suggest("Try edit_file instead.".into()),
+            action: "Try edit_file instead.".into(),
             confidence: 0.9,
         }]);
         let hint = engine.check_instincts("write_file", "{}", false, 0);
@@ -227,7 +216,7 @@ mod tests {
         let engine = engine_with_rules(vec![InstinctRuleDef {
             tool: "*".into(),
             condition: InstinctCondition::OnError,
-            action: InstinctAction::Suggest("Check the error message.".into()),
+            action: "Check the error message.".into(),
             confidence: 0.8,
         }]);
         assert!(engine.check_instincts("read_file", "{}", true, 2).is_some());
@@ -239,7 +228,7 @@ mod tests {
         let engine = engine_with_rules(vec![InstinctRuleDef {
             tool: "search".into(),
             condition: InstinctCondition::OnRepeat { min_repeats: 3 },
-            action: InstinctAction::Suggest("Try a different query.".into()),
+            action: "Try a different query.".into(),
             confidence: 0.7,
         }]);
         assert!(engine.check_instincts("search", "{}", false, 3).is_some());
@@ -251,7 +240,7 @@ mod tests {
         let engine = engine_with_rules(vec![InstinctRuleDef {
             tool: "list_files".into(),
             condition: InstinctCondition::ParamExceeds { param: "depth".into(), threshold: 3.0 },
-            action: InstinctAction::Suggest("Reduce depth to 1.".into()),
+            action: "Reduce depth to 1.".into(),
             confidence: 0.9,
         }]);
         assert!(engine.check_instincts("list_files", r#"{"depth":5}"#, false, 0).is_some());
@@ -263,7 +252,7 @@ mod tests {
         let engine = engine_with_rules(vec![InstinctRuleDef {
             tool: "*".into(),
             condition: InstinctCondition::OnError,
-            action: InstinctAction::Suggest("Generic error advice.".into()),
+            action: "Generic error advice.".into(),
             confidence: 0.5,
         }]);
         assert!(engine.check_instincts("any_tool", "{}", true, 0).is_some());
@@ -274,7 +263,7 @@ mod tests {
         let config = InstinctsConfig { enabled: false, rules: vec![InstinctRuleDef {
             tool: "*".into(),
             condition: InstinctCondition::Always,
-            action: InstinctAction::Suggest("test".into()),
+            action: "test".into(),
             confidence: 0.9,
         }]};
         let engine = InstinctsEngine::from_config(&config);
@@ -286,7 +275,7 @@ mod tests {
         let engine = engine_with_rules(vec![InstinctRuleDef {
             tool: "specific_tool".into(),
             condition: InstinctCondition::Always,
-            action: InstinctAction::Suggest("only for specific tool".into()),
+            action: "only for specific tool".into(),
             confidence: 0.9,
         }]);
         assert!(engine.check_instincts("other_tool", "{}", false, 0).is_none());
@@ -299,13 +288,13 @@ mod tests {
             InstinctRuleDef {
                 tool: "*".into(),
                 condition: InstinctCondition::Always,
-                action: InstinctAction::Suggest("low confidence".into()),
+                action: "low confidence".into(),
                 confidence: 0.3,
             },
             InstinctRuleDef {
                 tool: "*".into(),
                 condition: InstinctCondition::Always,
-                action: InstinctAction::Suggest("high confidence".into()),
+                action: "high confidence".into(),
                 confidence: 0.9,
             },
         ]);
@@ -325,13 +314,13 @@ mod tests {
             InstinctRuleDef {
                 tool: "a".into(),
                 condition: InstinctCondition::Always,
-                action: InstinctAction::Suggest("rule a".into()),
+                action: "rule a".into(),
                 confidence: 0.5,
             },
             InstinctRuleDef {
                 tool: "b".into(),
                 condition: InstinctCondition::OnError,
-                action: InstinctAction::Suggest("rule b".into()),
+                action: "rule b".into(),
                 confidence: 0.6,
             },
         ]);

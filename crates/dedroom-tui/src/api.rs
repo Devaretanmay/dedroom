@@ -206,6 +206,7 @@ pub struct ProxyEventItem {
 #[derive(Debug, Clone)]
 pub struct DashboardApi {
     client: reqwest::Client,
+    sse_client: reqwest::Client,
     base_url: String,
 }
 
@@ -217,6 +218,9 @@ impl DashboardApi {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("Failed to build reqwest client"),
+            sse_client: reqwest::Client::builder()
+                .build()
+                .expect("Failed to build reqwest SSE client"),
             base_url: format!("http://127.0.0.1:{port}"),
         }
     }
@@ -305,7 +309,7 @@ impl DashboardApi {
 
         let url = format!("{}/admin/events/stream", self.base_url);
         let resp = self
-            .client
+            .sse_client
             .get(&url)
             .send()
             .await

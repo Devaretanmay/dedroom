@@ -176,13 +176,25 @@ impl HealingMemory {
             let total = records.len();
             let successes = records.iter().filter(|r| r.success).count();
             let rate = if total > 0 { successes as f64 / total as f64 } else { 0.0 };
-            let best = self.best_strategy(tool);
+            // Compute best strategy inline to avoid re-locking
+            let mut rates: HashMap<&str, (usize, usize)> = HashMap::new();
+            for r in records {
+                let entry = rates.entry(&r.strategy_label).or_insert((0, 0));
+                entry.0 += 1;
+                if r.success {
+                    entry.1 += 1;
+                }
+            }
+            let best = rates.into_iter()
+                .map(|(s, (t, succ))| (s.to_string(), succ as f64 / t as f64))
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(s, _)| s);
             serde_json::json!({
                 "tool_name": tool,
                 "total_attempts": total,
                 "successes": successes,
                 "success_rate": rate,
-                "best_strategy": best.map(|(s, _)| s),
+                "best_strategy": best,
             })
         }).collect()
     }
