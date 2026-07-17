@@ -46,7 +46,7 @@ Attribution engine, PII redaction, SQLite persistence, and benchmarks.
 ### Features
 
 - **Attribution engine**: per-tool token savings tracking. Shows exactly how much each compressor saves per tool call.
-- **PII redaction**: 14 regex patterns plus entropy-based detection for API keys, tokens, and secrets. Runs locally before forwarding.
+- **PII redaction**: 15 regex patterns plus entropy-based detection for API keys, tokens, and secrets. Runs locally before forwarding.
 - **SQLite persistence**: optional backend for CCR deduplication and loop detection history. WAL mode, batch pruning, persisted adaptive thresholds.
 - **Shadow mode**: process tool calls in ghost mode — log verdicts to event stream but never block requests.
 - **Azure OpenAI support**: dynamic model discovery from upstream API.

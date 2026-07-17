@@ -17,7 +17,7 @@ use crate::proxy::AppState;
 pub async fn chat_completions(
     Extension(state): Extension<Arc<AppState>>,
     headers: HeaderMap,
-    JsonExtractor(body): JsonExtractor<Value>,
+    JsonExtractor(mut body): JsonExtractor<Value>,
 ) -> impl IntoResponse {
     let session_id = intercept::get_session_id(&headers);
     let agent_id = intercept::get_agent_id(&headers);
@@ -48,6 +48,13 @@ pub async fn chat_completions(
 
     let proxy_cfg = state.proxy_config.read().await.clone();
 
+    // Apply redaction + compression to tool-result payloads before they are
+    // forwarded upstream, so secrets and redundant context stay local.
+    {
+        let guard = pipeline.lock().await;
+        intercept::transform_request_body(&mut body, &guard);
+    }
+
     match intercept::forward_to_upstream(
         &headers,
         body,
@@ -77,7 +84,7 @@ pub async fn chat_completions(
 pub async fn messages(
     Extension(state): Extension<Arc<AppState>>,
     headers: HeaderMap,
-    JsonExtractor(body): JsonExtractor<Value>,
+    JsonExtractor(mut body): JsonExtractor<Value>,
 ) -> impl IntoResponse {
     let session_id = intercept::get_session_id(&headers);
     let agent_id = intercept::get_agent_id(&headers);
@@ -102,6 +109,13 @@ pub async fn messages(
     }
 
     let proxy_cfg = state.proxy_config.read().await.clone();
+
+    // Apply redaction + compression to tool-result payloads before they are
+    // forwarded upstream, so secrets and redundant context stay local.
+    {
+        let guard = pipeline.lock().await;
+        intercept::transform_request_body(&mut body, &guard);
+    }
 
     match intercept::forward_to_upstream(
         &headers,

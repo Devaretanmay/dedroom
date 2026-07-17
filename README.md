@@ -203,12 +203,12 @@ dedroom report                # Per-tool savings, top tools, self-healing stats
 dedroom report --port 9999
 ```
 
-### `dedroom dash` — terminal dashboard
+### Terminal dashboard
+
+The optional `dedroom-tui` crate provides a live terminal dashboard:
 
 ```bash
-dedroom dash                  # Auto-detects proxy on port 8080
-dedroom dash --port 9090
-dedroom dash http://10.0.0.5:9090   # Remote proxy
+cd crates/dedroom-tui && cargo run -- --port 8080
 ```
 
 
@@ -242,9 +242,9 @@ result = pipeline.process_tool("write_file", '{}', tool_result)
 print(f"Blocked: {result['is_blocked']}")
 print(f"Compression: {result['original_tokens']} → {result['compressed_tokens']} tokens")
 
-# Standalone functions
-verdict = detect_loop("write_file", '{}', max_repeats=3)
-compressed = compress_text(tool_output, content_type="code")
+# Standalone functions (config_yaml="" uses built-in defaults)
+verdict = detect_loop("write_file", '{}', config_yaml="")
+compressed = compress_text(tool_output, config_yaml="")
 ```
 
 See the [Security Audit Agent example](examples/security_audit_agent.py) for a full production-style integration.
@@ -312,17 +312,25 @@ redaction:
 ### Internal Pipeline
 
 ```
-Receive Request → Extract Tools → Trust Check → Redact PII →
+Receive Request → Extract Tools → Redact PII →
 Loop Detect → Compress → Judgment & Learning → Forward →
 Record Telemetry
 ```
 
-- **Trust verification** — lowers `max_repeats` to `1` when trust score drops
-- **Redaction** — 14 regex patterns + entropy detection for secrets
+> **Note:** Redaction and compression run on the request body *before* it is
+> forwarded to the upstream provider. Single JSON objects and non-JSON secrets
+> pass through unmodified; the compressors target repetitive line- and
+> list-shaped payloads (logs, stack traces, repeated tool output).
+
+- **Trust / adaptive threshold** — the loop detector lowers `max_repeats`
+  toward `1` when a tool's recent error rate is high (error-aware thresholds),
+  reducing wasted retries
+- **Redaction** — 15 regex patterns plus entropy-based detection for secrets
 - **Loop detection** — sliding window with adaptive, error-aware thresholds
 - **Compression** — 4 compressors tuned for different payload shapes
-- **Cross-session learning** — stores failure signatures and injects hints across sessions
-- **Telemetry** — NDJSON event log: tilt index, compression ratios, trust scores, per-tool savings
+- **In-session learning** — stores failure signatures and injects hints to
+  improve retries within a running proxy session
+- **Telemetry** — NDJSON event log: tilt index, compression ratios, per-tool savings
 
 ---
 

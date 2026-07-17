@@ -145,7 +145,7 @@ impl SelfHealingEngine {
         if let Some((ref strategy, confidence)) = memory_suggestion
             && confidence >= 0.6 {
                 let hint = format!(
-                    "{} [learned from past sessions] {}",
+                    "{} [learned from prior attempts] {}",
                     match self.config.mode {
                         crate::config::HealingMode::Conservative => "Consider: ",
                         crate::config::HealingMode::Balanced => "Adapting strategy — ",

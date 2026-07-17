@@ -437,7 +437,7 @@ fn parse_args() -> Result<CliCommand> {
             let cmd = cmd_parts.remove(0);
             Ok(CliCommand::Run { port, connect_port, config, cmd, cmd_args: cmd_parts })
         }
-        _ => bail!("Unknown command: \"{command}\". Available: init, status, stop, wrap, unwrap, doctor, proxy, run, report, dash. Run `dedroom` alone to see full usage."),
+        _ => bail!("Unknown command: \"{command}\". Available: init, status, stop, wrap, unwrap, doctor, proxy, run, report. Run `dedroom` alone to see full usage."),
     }
 }
 
@@ -967,7 +967,8 @@ fn launch_opencode(port: u16, extra_args: &[String]) -> Result<std::process::Chi
     let mut cmd = Command::new(&opencode_binary);
     cmd.env(
             "OPENCODE_CONFIG_CONTENT",
-            serde_json::to_string(&config_content).unwrap(),
+            serde_json::to_string(&config_content)
+                .expect("serialize opencode config"),
         )
         .env("ANTHROPIC_BASE_URL", &proxy_url)
         .env("OPENAI_BASE_URL", &proxy_url_v1)
@@ -1265,7 +1266,9 @@ fn restore_opencode_provider_config() -> Result<(String, PathBuf)> {
 fn check_port(port: u16) -> bool {
     use std::net::TcpStream;
     TcpStream::connect_timeout(
-        &format!("127.0.0.1:{port}").parse().unwrap(),
+        &format!("127.0.0.1:{port}")
+            .parse()
+            .expect("valid socket addr"),
         Duration::from_millis(1000),
     )
     .is_ok()
@@ -2174,7 +2177,7 @@ fn check_codex_routing(port: u16) -> CheckResult {
 
     let base_url_re =
         regex::Regex::new(r#"base_url\s*=\s*"https?://(?:127\.0\.0\.1|localhost):(\d+)"#)
-            .unwrap();
+            .expect("valid regex");
     if let Some(caps) = base_url_re.captures(&text) {
         let found_port: u16 = caps[1].parse().unwrap_or(0);
         if found_port != port {
@@ -2254,7 +2257,8 @@ fn check_opencode_routing(port: u16) -> CheckResult {
         .and_then(|v| v.as_str())
     {
         let loopback_re =
-            regex::Regex::new(r#"^https?://(?:127\.0\.0\.1|localhost):(\d+)/v1$"#).unwrap();
+            regex::Regex::new(r#"^https?://(?:127\.0\.0\.1|localhost):(\d+)/v1$"#)
+                .expect("valid regex");
         if let Some(caps) = loopback_re.captures(base_url) {
             let found_port: u16 = caps[1].parse().unwrap_or(0);
             if found_port != port {
@@ -2361,7 +2365,8 @@ fn check_env_var_routing(name: &str, vars: &[&str], port: u16, none_hint: &str) 
 
 fn classify_routing_url(name: &str, url: &str, port: u16, source: &str) -> CheckResult {
     let loopback_re =
-        regex::Regex::new(r#"^https?://(?:127\.0\.0\.1|localhost):(\d+)"#).unwrap();
+        regex::Regex::new(r#"^https?://(?:127\.0\.0\.1|localhost):(\d+)"#)
+            .expect("valid regex");
 
     match loopback_re.captures(url.trim()) {
         None => CheckResult {
@@ -2582,7 +2587,10 @@ async fn doctor(port: u16, emit_json: bool) -> Result<i32> {
             "checks": json_checks,
         });
 
-        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        println!(
+        "{}",
+        serde_json::to_string_pretty(&output).expect("serialize report")
+    );
     } else {
         render_doctor(&checks, port, installed_version);
     }
@@ -2820,7 +2828,7 @@ async fn report(port: u16) -> Result<i32> {
         return Ok(1);
     }
 
-    let a = att.unwrap();
+    let a = att.unwrap_or(serde_json::Value::Null);
 
     let total_tokens_processed = a.get("total_tokens_processed").and_then(|v| v.as_u64()).unwrap_or(0);
     let total_tokens_saved = a.get("total_tokens_saved").and_then(|v| v.as_u64()).unwrap_or(0);

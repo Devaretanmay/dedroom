@@ -428,6 +428,54 @@ pub async fn forward_to_upstream(
     }
 }
 
+/// Rewrite a request body in place so that tool-result payloads are
+/// redacted and compressed before being forwarded upstream.
+///
+/// This is what makes the "redact PII / compress context before forwarding"
+/// promise real: the proxy no longer forwards the original, untouched body.
+/// Only `role: "tool"` (OpenAI) and `tool_result` content blocks (Anthropic)
+/// are transformed — the assistant's own tool-call arguments are left intact
+/// so credentials the model needs are not stripped.
+pub fn transform_request_body(body: &mut Value, pipeline: &Pipeline) {
+    let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    for msg in messages {
+        if msg.get("role").and_then(|r| r.as_str()) == Some("tool") {
+            if let Some(content) = msg.get_mut("content") {
+                transform_content_value(content, pipeline);
+            }
+        }
+        if let Some(blocks) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+            for block in blocks {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                    if let Some(content) = block.get_mut("content") {
+                        transform_content_value(content, pipeline);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn transform_content_value(content: &mut Value, pipeline: &Pipeline) {
+    match content {
+        Value::String(s) => {
+            let transformed = pipeline.transform_tool_output(s);
+            *s = transformed;
+        }
+        Value::Array(items) => {
+            for item in items {
+                if let Some(text) = item.get_mut("text").and_then(|t| t.as_str()) {
+                    let transformed = pipeline.transform_tool_output(text);
+                    *item.get_mut("text").unwrap() = Value::String(transformed);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Intercept an upstream response and pass it through the pipeline for
 /// telemetry recording. Returns modified response data.
 pub async fn record_upstream_response(

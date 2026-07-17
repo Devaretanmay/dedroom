@@ -8,15 +8,34 @@
 //!
 //! Listens on a separate port (default 8081) from the main HTTP proxy (8080).
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Maximum CONNECT request header size (4 KB).
 const MAX_CONNECT_HEADER: usize = 4096;
 
+/// Extract the host portion of a URL or `host:port` string.
+pub fn host_of(s: &str) -> String {
+    let s = s
+        .split("://")
+        .last()
+        .unwrap_or(s)
+        .split(['/', '?'])
+        .next()
+        .unwrap_or(s);
+    s.split(':').next().unwrap_or(s).to_string()
+}
+
 /// Entry point: handle a single CONNECT tunnel connection.
-pub async fn handle_tunnel(stream: TcpStream) {
-    match handle_connect(stream).await {
+///
+/// `allowed` is the set of upstream hostnames the tunnel is permitted to
+/// reach. Anything else is refused, so theCONNECT tunnel cannot be abused
+/// as an open proxy.
+pub async fn handle_tunnel(stream: TcpStream, allowed: Arc<HashSet<String>>) {
+    match handle_connect(stream, allowed).await {
         Ok(()) => {}
         Err(e) => {
             tracing::debug!("CONNECT tunnel error: {e}");
@@ -29,7 +48,10 @@ pub async fn handle_tunnel(stream: TcpStream) {
 /// Reads the CONNECT request, resolves the target host:port, establishes
 /// a TCP connection to it, sends back a 200, then copies bytes
 /// bidirectionally (tunnel mode).
-async fn handle_connect(mut stream: TcpStream) -> Result<(), String> {
+async fn handle_connect(
+    mut stream: TcpStream,
+    allowed: Arc<HashSet<String>>,
+) -> Result<(), String> {
     // Peek at the first bytes to check for "CONNECT "
     let mut buf = [0u8; 9];
     let peeked = stream.peek(&mut buf).await.map_err(|e| e.to_string())?;
@@ -64,6 +86,13 @@ async fn handle_connect(mut stream: TcpStream) -> Result<(), String> {
     }
 
     let host_port = parts[1];
+    let target_host = host_port.split(':').next().unwrap_or(host_port).to_string();
+
+    // Refuse to tunnel to hosts outside the allowed upstream set.
+    if !allowed.is_empty() && !allowed.contains(&target_host) {
+        tracing::warn!("CONNECT tunnel refused for non-allowlisted host: {target_host}");
+        return Err(format!("CONNECT target not allowed: {target_host}"));
+    }
 
     // Resolve host:port — lookup_host handles IP:port, hostname:port, etc.
     let addr = tokio::net::lookup_host(host_port)

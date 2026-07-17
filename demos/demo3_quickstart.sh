@@ -8,6 +8,8 @@ echo ""
 echo "  DedrooM Quick Start Demo"
 echo "  ========================="
 echo ""
+echo "  (Walkthrough: shows the commands you'd run. It does not execute them.)"
+echo ""
 sleep 1
 
 echo "  Step 1: Install (one pip command)"

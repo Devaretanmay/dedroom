@@ -265,6 +265,58 @@ impl Pipeline {
         })
     }
 
+    /// Redact secrets and compress a tool-result payload WITHOUT recording
+    /// telemetry. Returns the transformed content.
+    ///
+    /// This is the function the proxy uses to actually rewrite a request
+    /// body before it is forwarded upstream — so redaction and compression
+    /// are applied on the wire, not just computed as telemetry.
+    pub fn transform_tool_output(&self, content: &str) -> String {
+        if content.is_empty() {
+            return String::new();
+        }
+        let (redacted, _report) = self.redaction_engine.redact(content);
+        let (content_type, parsed) = self.content_router.detect_type_with_value(&redacted);
+        let retention =
+            retention_for_level(determine_level(self.loop_state, &self.config.loop_compression_coupling));
+        let compressed = match content_type {
+            ContentType::JsonArray => {
+                if let Some(Value::Array(arr)) = parsed {
+                    compress_slice(&arr, retention, arr.len())
+                        .ok()
+                        .map(|r| r.content)
+                } else {
+                    compress_json_array(&redacted, retention)
+                        .ok()
+                        .map(|r| r.content)
+                }
+            }
+            ContentType::Code => {
+                if self.config.compression.compressors.code_compressor {
+                    Some(compress_code(&redacted, detect_language(&redacted)))
+                } else {
+                    None
+                }
+            }
+            ContentType::Log => {
+                if self.config.compression.compressors.log_compressor {
+                    Some(compress_logs(&redacted))
+                } else {
+                    None
+                }
+            }
+            ContentType::Text => {
+                if self.config.compression.compressors.text_compressor {
+                    Some(compress_text(&redacted))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        compressed.unwrap_or(redacted)
+    }
+
     pub fn loop_state_summary(&self) -> LoopStateSummary {
         self.loop_detector.state_summary()
     }
@@ -358,5 +410,24 @@ mod tests {
         if result.loop_verdict.is_blocked() {
             assert!(result.injection_hint.is_some());
         }
+    }
+
+    #[test]
+    fn test_transform_tool_output_redacts_secrets() {
+        let pipeline = Pipeline::new(DedrooMConfig::default());
+        let payload = "api_key=sk-abcdefghijklmnopqrstuvwxyz0123456789 output done";
+        let out = pipeline.transform_tool_output(payload);
+        assert!(!out.contains("sk-abcdefghijklmnopqrstuvwxyz0123456789"),
+            "secret must be redacted before forwarding");
+    }
+
+    #[test]
+    fn test_transform_tool_output_compresses_json_array() {
+        let pipeline = Pipeline::new(DedrooMConfig::default());
+        let rows: Vec<&str> = std::iter::repeat(r#"{"level":"info","msg":"tick"}"#).take(20).collect();
+        let payload = format!("[{}]", rows.join(","));
+        let out = pipeline.transform_tool_output(&payload);
+        assert!(out.len() < payload.len(), "repetitive array should shrink");
+        assert!(out.starts_with('[') && out.ends_with(']'));
     }
 }

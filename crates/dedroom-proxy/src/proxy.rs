@@ -3,6 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::extract::Request;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use dedroom_core::config::DedrooMConfig;
@@ -56,6 +59,10 @@ pub struct AppState {
     pub event_log: EventLog,
     /// Monotonic timestamp when the proxy started (std::time::Instant).
     pub startup_instant: std::time::Instant,
+    /// Optional admin token. When set, all `/admin/*` endpoints require a
+    /// matching `X-Dedroom-Token` (or `Authorization: Bearer`) header.
+    /// When unset (default, localhost dev), the admin API is open.
+    pub admin_token: Option<String>,
 }
 
 impl AppState {
@@ -79,6 +86,7 @@ impl AppState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             event_log,
             startup_instant: std::time::Instant::now(),
+            admin_token: std::env::var("DEDROOM_ADMIN_TOKEN").ok().filter(|s| !s.is_empty()),
         }
     }
 
@@ -132,6 +140,16 @@ impl ProxyRouter {
     /// - `GET /admin/stats` — pipeline savings and telemetry report
     /// - `POST /admin/runtime-env` — live config update
     pub fn build(&self) -> Router {
+        let admin_routes = Router::new()
+            .route("/admin/stats", get(handlers::stats))
+            .route("/admin/events", get(handlers::events))
+            .route("/admin/events/stream", get(handlers::events_stream))
+            .route("/admin/runtime-env", post(handlers::runtime_env))
+            .route("/admin/attribution", get(handlers::attribution))
+            .route("/admin/learning", get(handlers::learning))
+            .route("/admin/instincts", get(handlers::instincts))
+            .layer(middleware::from_fn(admin_guard));
+
         Router::new()
             .route(
                 "/v1/chat/completions",
@@ -140,13 +158,39 @@ impl ProxyRouter {
             .route("/v1/messages", post(handlers::messages))
             .route("/v1/models", get(handlers::models))
             .route("/health", get(handlers::health))
-            .route("/admin/stats", get(handlers::stats))
-            .route("/admin/events", get(handlers::events))
-            .route("/admin/events/stream", get(handlers::events_stream))
-            .route("/admin/runtime-env", post(handlers::runtime_env))
-            .route("/admin/attribution", get(handlers::attribution))
-            .route("/admin/learning", get(handlers::learning))
-            .route("/admin/instincts", get(handlers::instincts))
+            .merge(admin_routes)
             .layer(Extension(self.state.clone()))
+    }
+}
+
+/// Middleware guarding `/admin/*` endpoints.
+///
+/// If the proxy was started with `DEDROOM_ADMIN_TOKEN` set, every admin
+/// request must carry that token via `X-Dedroom-Token` or
+/// `Authorization: Bearer <token>`. When no token is configured (the
+/// default for local, localhost-bound operation) the API stays open.
+async fn admin_guard(req: Request, next: Next) -> Response {
+    let token = req
+        .extensions()
+        .get::<Arc<AppState>>()
+        .and_then(|s| s.admin_token.clone());
+
+    if let Some(expected) = token {
+        let provided = req
+            .headers()
+            .get("x-dedroom-token")
+            .and_then(|v| v.to_str().ok())
+            .or_else(|| req.headers().get("authorization").and_then(|v| v.to_str().ok()))
+            .map(|s| s.trim_start_matches("Bearer ").to_string());
+        match provided {
+            Some(p) if p == expected => next.run(req).await,
+            _ => (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "admin authentication required",
+            )
+                .into_response(),
+        }
+    } else {
+        next.run(req).await
     }
 }

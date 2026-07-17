@@ -375,7 +375,7 @@ async fn async_main(
     };
 
     // Build Pipeline and proxy state
-    let state = proxy::AppState::new(config, shadow_mode, api_key, upstream_url);
+    let state = proxy::AppState::new(config, shadow_mode, api_key, upstream_url.clone());
     let router = proxy::ProxyRouter::new(state.clone()).build();
     let state_arc = Arc::new(state);
 
@@ -401,12 +401,23 @@ async fn async_main(
             "CONNECT proxy listening on {connect_addr} — set HTTPS_PROXY=http://127.0.0.1:{connect_port} to route any agent through DedrooM"
         );
 
+        // Only allow CONNECT tunnels to the configured upstream LLM hosts,
+        // so the tunnel cannot be abused as an open proxy.
+        let mut allowed_hosts = std::collections::HashSet::new();
+        allowed_hosts.insert(crate::connect::host_of("https://api.openai.com"));
+        allowed_hosts.insert(crate::connect::host_of("https://api.anthropic.com"));
+        if let Some(ref u) = upstream_url {
+            allowed_hosts.insert(crate::connect::host_of(u));
+        }
+        let allowed = std::sync::Arc::new(allowed_hosts);
+
         tokio::spawn(async move {
             loop {
                 match connect_listener.accept().await {
                     Ok((stream, _peer)) => {
+                        let allowed = allowed.clone();
                         tokio::spawn(async move {
-                            crate::connect::handle_tunnel(stream).await;
+                            crate::connect::handle_tunnel(stream, allowed).await;
                         });
                     }
                     Err(e) => {

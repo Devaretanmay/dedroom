@@ -149,6 +149,10 @@ impl RedactionEngine {
             }
         }
 
+        // 1.5 Entropy-based detection of high-entropy secret strings that are
+        // not matched by a specific known format (e.g. random bearer tokens).
+        output = redact_high_entropy(&output, &mut report);
+
         // 2. Context-aware redaction — walk JSON tree, redact sensitive field values
         if self.config.context_detection
             && let Ok(value) = serde_json::from_str::<serde_json::Value>(&output) {
@@ -204,8 +208,52 @@ impl RedactionEngine {
     }
 }
 
-fn report_context_match(items: &mut Vec<RedactedItem>, field: &str, length: usize) {
-    items.push(RedactedItem {
+/// Redact long, high-Shannon-entropy token strings that are not already
+/// covered by a specific known-secret pattern. This is the "entropy
+/// detection" layer: a random ≥24-char base64/hex run with entropy ≥ 4.0
+/// bits/char is treated as a likely secret and replaced.
+fn redact_high_entropy(input: &str, report: &mut RedactionReport) -> String {
+    let re = match Regex::new(r"[A-Za-z0-9+/_=-]{24,}") {
+        Ok(re) => re,
+        Err(_) => return input.to_string(),
+    };
+    let tokens: Vec<String> = re.find_iter(input).map(|m| m.as_str().to_string()).collect();
+    let mut output = input.to_string();
+    for tok in tokens {
+        if shannon_entropy(&tok) >= 4.0 {
+            report.pattern_matches += 1;
+            report.items.push(RedactedItem {
+                method: RedactionMethod::Pattern,
+                label: "high-entropy-secret".to_string(),
+                length: tok.len(),
+            });
+            output = output.replace(&tok, "[REDACTED]");
+        }
+    }
+    output
+}
+
+/// Shannon entropy of a string, in bits per character (log base 2).
+fn shannon_entropy(s: &str) -> f64 {
+    if s.is_empty() {
+        return 0.0;
+    }
+    let mut counts = [0u32; 256];
+    for b in s.bytes() {
+        counts[b as usize] += 1;
+    }
+    let len = s.len() as f64;
+    let mut ent = 0.0;
+    for &c in counts.iter() {
+        if c > 0 {
+            let p = c as f64 / len;
+            ent -= p * p.log2();
+        }
+    }
+    ent
+}
+
+fn report_context_match(items: &mut Vec<RedactedItem>, field: &str, length: usize) {    items.push(RedactedItem {
         method: RedactionMethod::Context,
         label: format!("field: {field:?}"),
         length,
@@ -425,6 +473,28 @@ mod tests {
         let (out, report) = engine.redact("sk-ant-abcdefghijklmnopqrstuvwxyz1234567890");
         assert!(!out.contains("sk-ant-"));
         assert_eq!(report.pattern_matches, 1);
+    }
+
+    #[test]
+    fn test_redact_high_entropy_secret() {
+        let engine = RedactionEngine::default_enabled();
+        // 32-char random-looking base64 token with high entropy.
+        let token = "Z9xKp2mNq7vR8tWc4sYb1uHd6gF3jL5aE";
+        let input = format!("Authorization: Bearer {token}");
+        let (out, report) = engine.redact(&input);
+        assert!(!out.contains(token), "high-entropy token should be redacted");
+        assert!(out.contains("[REDACTED]"));
+        assert!(report.pattern_matches >= 1);
+    }
+
+    #[test]
+    fn test_no_redact_low_entropy_text() {
+        let engine = RedactionEngine::default_enabled();
+        // Long but low-entropy (repeated) string should not be flagged.
+        let input = "this is a fairly long sentence with normal words repeated repeatedly yes";
+        let (out, report) = engine.redact(input);
+        assert_eq!(out, input, "low-entropy prose must be left intact");
+        assert_eq!(report.pattern_matches, 0);
     }
 
     #[test]
