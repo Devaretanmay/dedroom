@@ -461,19 +461,44 @@ pub fn transform_request_body(body: &mut Value, pipeline: &Pipeline) {
 fn transform_content_value(content: &mut Value, pipeline: &Pipeline) {
     match content {
         Value::String(s) => {
+            let original = s.len();
             let transformed = pipeline.transform_tool_output(s);
+            record_compression_savings(pipeline, original, transformed.len());
             *s = transformed;
         }
         Value::Array(items) => {
             for item in items {
                 if let Some(text) = item.get_mut("text").and_then(|t| t.as_str()) {
+                    let original = text.len();
                     let transformed = pipeline.transform_tool_output(text);
+                    record_compression_savings(pipeline, original, transformed.len());
                     *item.get_mut("text").unwrap() = Value::String(transformed);
                 }
             }
         }
         _ => {}
     }
+}
+
+/// Record the byte delta of a transformed tool payload as compression savings.
+///
+/// Token counts are approximated (4 chars ≈ 1 token), matching the rest of the
+/// proxy's savings heuristic, so the admin savings ledger reflects real bytes
+/// kept off the wire even though the upstream never sees them. Both the atomic
+/// ledger and the per-call history are updated so `/admin/stats` and
+/// `/admin/attribution` report the same numbers.
+fn record_compression_savings(pipeline: &Pipeline, original_bytes: usize, compressed_bytes: usize) {
+    if compressed_bytes >= original_bytes {
+        return;
+    }
+    let original_tokens = (original_bytes / 4) as u64;
+    let compressed_tokens = (compressed_bytes / 4) as u64;
+    pipeline
+        .savings_ledger
+        .record_compression(original_tokens, compressed_tokens);
+    pipeline
+        .savings_ledger
+        .record_tool_call("tool_result", original_tokens, compressed_tokens, false, false, false);
 }
 
 /// Intercept an upstream response and pass it through the pipeline for
